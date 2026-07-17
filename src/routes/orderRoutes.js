@@ -1,6 +1,6 @@
 const express = require('express');
 const {
-  listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder,
+  listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, listRequests, dismissRequest,
 } = require('../controllers/orderController');
 const { exportOrders } = require('../controllers/exportController');
 const { protect, enforceTenant } = require('../middleware/auth');
@@ -12,6 +12,8 @@ router.use(protect, enforceTenant);
 router.get('/export', exportOrders); // must come before /:orderId
 router.post('/clear-table', clearTable);
 router.post('/staff-place', placeStaffOrder);
+router.get('/requests', listRequests);
+router.patch('/requests/:requestId/dismiss', dismissRequest);
 
 router.get('/', listOrders);
 router.patch('/:orderId', updateOrderStatus);

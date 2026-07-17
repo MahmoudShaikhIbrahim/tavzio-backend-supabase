@@ -5,6 +5,7 @@ const {
   logPublicEvent,
   loyaltyCheckin,
   loyaltyStatus,
+  claimReward,
   getPublicMenu,
   submitOrder,
   getPublicServices,
@@ -20,6 +21,7 @@ router.get('/business/:slug', getPublicBusiness);
 router.post('/business/:slug/event', logPublicEvent);
 router.post('/business/:slug/loyalty/checkin', loyaltyCheckin);
 router.get('/business/:slug/loyalty/status', loyaltyStatus);
+router.post('/business/:slug/loyalty/claim', claimReward);
 router.get('/business/:slug/menu', getPublicMenu);
 router.post('/business/:slug/orders', submitOrder);
 router.get('/business/:slug/services', getPublicServices);

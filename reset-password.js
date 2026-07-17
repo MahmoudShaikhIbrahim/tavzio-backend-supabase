@@ -24,6 +24,16 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// A second, non-admin client - deliberately separate from supabaseAdmin -
+// used only to immediately test the real sign-in path with the exact
+// in-memory password string, closing the loop with proof instead of
+// asking you to go check in a browser (where a typo or shell-quoting
+// issue could introduce a brand new discrepancy).
+const supabasePublic = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
+
 async function run() {
   // Supabase's admin API needs the user's ID, not just their email - so
   // this looks the account up first, by paging through users until it
@@ -51,7 +61,21 @@ async function run() {
 
   if (updateError) throw updateError;
 
-  console.log(`Password updated for ${email} (user id: ${user.id}). You can log in with the new password now.`);
+  console.log(`Password updated for ${email} (user id: ${user.id}).`);
+  console.log('Testing sign-in with the exact same password now...');
+
+  const { error: signInError } = await supabasePublic.auth.signInWithPassword({ email, password: newPassword });
+
+  if (signInError) {
+    console.error(`\nSelf-test FAILED: ${signInError.message}`);
+    console.error('This means the password update itself did not take effect the way it should have -');
+    console.error('this is a deeper issue than a typo or browser autofill, and worth flagging directly rather than retrying blindly.');
+    process.exit(1);
+  }
+
+  console.log('\nSelf-test PASSED - this exact password genuinely works against Supabase, right now, proven.');
+  console.log('If the browser still rejects it after this, the cause is on the browser/network side (rate-limiting,');
+  console.log('a stale saved password, or a mismatch in what gets typed there) - not the account or the password itself.');
 }
 
 run().catch((err) => {

@@ -3,17 +3,56 @@ const asyncHandler = require('../utils/asyncHandler');
 const { logAction } = require('../utils/auditLog');
 
 // @route GET /api/businesses/:businessId/orders?status=
+// Only real food orders - call_waiter/request_bill quick requests are
+// NOT orders in any meaningful sense (no items, no kitchen prep, no
+// "mark preparing" workflow) and have their own listRequests endpoint.
 const listOrders = asyncHandler(async (req, res) => {
   let query = req.supabase
     .from('orders')
     .select('*, order_items(*)')
     .eq('business_id', req.params.businessId)
+    .eq('request_type', 'order')
     .order('created_at', { ascending: false });
 
   if (req.query.status) query = query.eq('status', req.query.status);
 
   const { data, error } = await query;
   if (error) return res.status(400).json({ message: error.message });
+  res.json(data);
+});
+
+// @route GET /api/businesses/:businessId/requests
+// Call Waiter / Request Bill pings - a lightweight, separate feed, never
+// mixed into the kitchen's order queue. Only ever pending or completed
+// (dismissed) - never goes through preparing/ready/cancelled.
+const listRequests = asyncHandler(async (req, res) => {
+  const { data, error } = await req.supabase
+    .from('orders')
+    .select('id, table_label, request_type, status, created_at')
+    .eq('business_id', req.params.businessId)
+    .neq('request_type', 'order')
+    .eq('voided', false)
+    .order('created_at', { ascending: false })
+    .limit(50);
+
+  if (error) return res.status(400).json({ message: error.message });
+  res.json(data);
+});
+
+// @route PATCH /api/businesses/:businessId/requests/:requestId/dismiss
+// The only action a Call Waiter/Request Bill ping needs - no food-order
+// lifecycle applies to it.
+const dismissRequest = asyncHandler(async (req, res) => {
+  const { data, error } = await req.supabase
+    .from('orders')
+    .update({ status: 'completed' })
+    .eq('id', req.params.requestId)
+    .eq('business_id', req.params.businessId)
+    .neq('request_type', 'order')
+    .select()
+    .single();
+
+  if (error || !data) return res.status(404).json({ message: 'Request not found' });
   res.json(data);
 });
 
@@ -220,4 +259,4 @@ const placeStaffOrder = asyncHandler(async (req, res) => {
   res.status(201).json({ order, items: orderItemRows });
 });
 
-module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder };
+module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, listRequests, dismissRequest };

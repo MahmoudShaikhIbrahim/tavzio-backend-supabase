@@ -241,51 +241,45 @@ const TAP_TOKEN_VALID_MINUTES = 30;
 // shown on receipts and exports, not added on top of displayed prices.
 const UAE_VAT_RATE = 0.05;
 
-// Applies one program's rule to a membership row and returns the updated
-// fields to persist, plus the transaction amount/type to log.
+const { getMeasure, isThresholdReady, getCurrentTier } = require('../utils/loyaltyEngine');
+
+// Applies one tap's worth of earning to a membership and returns the
+// updated fields to persist, plus the transaction to log. Spend-based
+// programs are NOT earned via tap at all - a tap alone doesn't know the
+// bill amount, so it just logs the visit for the record; actual spend
+// amounts are added later by staff via Adjust, and tier/threshold status
+// for spend programs is recomputed there instead.
 function applyEarn(program, membership) {
+  if (program.earn_method === 'spend') {
+    return {
+      update: { visits: membership.visits + 1 },
+      tx: { type: 'earn_visit', amount: 0 },
+      rewardReady: false,
+    };
+  }
+
   const cfg = program.config || {};
+  const visits = membership.visits + 1;
+  const update = { visits };
+  let txType = 'earn_visit';
+  let txAmount = 1;
 
-  if (program.type === 'punch_card') {
-    const visits = membership.visits + 1;
-    const required = cfg.visitsRequired || 10;
-    return {
-      update: { visits },
-      tx: { type: 'earn_visit', amount: 1 },
-      rewardReady: visits > 0 && visits % required === 0,
-    };
-  }
-
-  if (program.type === 'points') {
+  if (program.use_points) {
     const perVisit = cfg.pointsPerVisit || 10;
-    const points = membership.points + perVisit;
-    const threshold = cfg.redeemThreshold || 100;
-    return {
-      update: { points },
-      tx: { type: 'earn_points', amount: perVisit },
-      rewardReady: points >= threshold,
-    };
+    update.points = membership.points + perVisit;
+    txType = 'earn_points';
+    txAmount = perVisit;
   }
 
-  if (program.type === 'tiered') {
-    const visits = membership.visits + 1;
-    const tiers = [...(cfg.tiers || [])].sort((a, b) => b.visitsRequired - a.visitsRequired);
-    const earnedTier = tiers.find((t) => visits >= t.visitsRequired) || null;
-    return {
-      update: { visits, current_tier: earnedTier ? earnedTier.name : membership.current_tier },
-      tx: { type: 'earn_visit', amount: 1 },
-      rewardReady: false, // tiers are ongoing perks, not one-time redemptions
-    };
+  if (program.structure === 'tiered') {
+    const nextMembership = { ...membership, ...update };
+    const tier = getCurrentTier(program, nextMembership);
+    update.current_tier = tier ? tier.name : membership.current_tier;
+    return { update, tx: { type: txType, amount: txAmount }, rewardReady: false }; // tiers auto-apply at payment, never a one-time claim
   }
 
-  // 'spend' type isn't earned via self check-in — a tap alone doesn't know
-  // the bill amount. It still logs the visit for the record, but spend
-  // amounts are added later by staff via the dashboard adjust endpoint.
-  return {
-    update: { visits: membership.visits + 1 },
-    tx: { type: 'earn_visit', amount: 0 },
-    rewardReady: false,
-  };
+  const nextMembership = { ...membership, ...update };
+  return { update, tx: { type: txType, amount: txAmount }, rewardReady: isThresholdReady(program, nextMembership) };
 }
 
 // @route POST /api/public/business/:slug/loyalty/checkin
@@ -419,8 +413,39 @@ const loyaltyCheckin = asyncHandler(async (req, res) => {
     .select()
     .single();
 
-  res.json({ membership: updatedMembership, rewardReady, alreadyCounted: false });
+  const rewardInfo = await buildRewardInfo(program, updatedMembership);
+  res.json({ membership: updatedMembership, rewardReady, alreadyCounted: false, ...rewardInfo });
 });
+
+// Shared response shaping for both loyaltyCheckin and loyaltyStatus -
+// what reward (if any) this member can act on right now, structured so
+// the frontend never has to interpret free text to decide what to show.
+async function buildRewardInfo(program, membership) {
+  if (program.structure === 'tiered') {
+    const tier = getCurrentTier(program, membership);
+    return {
+      reward: null,
+      currentTierReward: tier
+        ? { name: tier.name, type: tier.rewardType, value: tier.rewardValue, description: tier.rewardDescription || '' }
+        : null,
+      pendingClaim: false, // tiered never uses the claim flow - applies automatically at Pay Bill
+    };
+  }
+
+  const ready = isThresholdReady(program, membership);
+  const { data: existingClaim } = await supabaseAdmin
+    .from('loyalty_reward_claims')
+    .select('id')
+    .eq('membership_id', membership.id)
+    .eq('status', 'pending')
+    .maybeSingle();
+
+  return {
+    reward: ready ? { type: program.reward_type, value: program.reward_value, description: program.reward_description } : null,
+    currentTierReward: null,
+    pendingClaim: !!existingClaim,
+  };
+}
 
 // @route GET /api/public/business/:slug/loyalty/status?phone=
 const loyaltyStatus = asyncHandler(async (req, res) => {
@@ -447,8 +472,82 @@ const loyaltyStatus = asyncHandler(async (req, res) => {
     .eq('business_id', business.id)
     .eq('customer_id', customer.id)
     .maybeSingle();
+  if (!membership) return res.json({ membership: null });
 
-  res.json({ membership: membership || null });
+  const { data: program } = await supabaseAdmin
+    .from('loyalty_programs')
+    .select('*')
+    .eq('business_id', business.id)
+    .eq('enabled', true)
+    .maybeSingle();
+  if (!program) return res.json({ membership });
+
+  const rewardInfo = await buildRewardInfo(program, membership);
+  res.json({ membership, ...rewardInfo });
+});
+
+// @route POST /api/public/business/:slug/loyalty/claim
+// Body: { phone, tapEventId }
+// Customer taps "Claim reward" - creates a PENDING claim, tied to this
+// specific table/card, for staff to see. Does NOT touch the membership's
+// points/visits yet - nothing is "spent" until the claim is genuinely
+// applied (bill paid, or staff marks a manual reward applied).
+const claimReward = asyncHandler(async (req, res) => {
+  const { phone, tapEventId } = req.body;
+  if (!phone || !tapEventId) return res.status(400).json({ message: 'phone and tapEventId are required' });
+
+  const { data: business } = await supabaseAdmin.from('businesses').select('id').eq('slug', req.params.slug).eq('status', 'active').single();
+  if (!business) return res.status(404).json({ message: 'Business not found' });
+
+  const cutoff = new Date(Date.now() - TAP_TOKEN_VALID_MINUTES * 60 * 1000).toISOString();
+  const { data: tapEvent } = await supabaseAdmin
+    .from('events')
+    .select('id, card_id')
+    .eq('id', tapEventId)
+    .eq('business_id', business.id)
+    .eq('type', 'nfc_tap')
+    .gte('created_at', cutoff)
+    .maybeSingle();
+  if (!tapEvent) return res.status(400).json({ message: 'This tap has expired - tap the card again' });
+
+  const { data: program } = await supabaseAdmin.from('loyalty_programs').select('*').eq('business_id', business.id).eq('enabled', true).maybeSingle();
+  if (!program || program.structure !== 'threshold') {
+    return res.status(400).json({ message: 'No claimable reward for this program' });
+  }
+
+  const { data: customer } = await supabaseAdmin.from('customers').select('id').eq('phone', phone).maybeSingle();
+  const { data: membership } = customer
+    ? await supabaseAdmin.from('loyalty_memberships').select('*').eq('business_id', business.id).eq('customer_id', customer.id).maybeSingle()
+    : { data: null };
+  if (!membership || !isThresholdReady(program, membership)) {
+    return res.status(400).json({ message: 'No reward ready to claim' });
+  }
+
+  const { data: existingClaim } = await supabaseAdmin.from('loyalty_reward_claims').select('id').eq('membership_id', membership.id).eq('status', 'pending').maybeSingle();
+  if (existingClaim) return res.status(400).json({ message: 'A claim is already pending for this reward' });
+
+  let tableLabel = '';
+  if (tapEvent.card_id) {
+    const { data: card } = await supabaseAdmin.from('cards').select('label').eq('id', tapEvent.card_id).maybeSingle();
+    tableLabel = card?.label || '';
+  }
+
+  const { data: claim, error } = await supabaseAdmin
+    .from('loyalty_reward_claims')
+    .insert({
+      business_id: business.id,
+      membership_id: membership.id,
+      card_id: tapEvent.card_id,
+      table_label: tableLabel,
+      reward_type: program.reward_type,
+      reward_value: program.reward_value,
+      reward_description: program.reward_description,
+    })
+    .select()
+    .single();
+  if (error) return res.status(400).json({ message: error.message });
+
+  res.status(201).json({ claim });
 });
 
 // @route GET /api/public/business/:slug/menu
@@ -815,8 +914,44 @@ const getBill = asyncHandler(async (req, res) => {
     .flatMap((o) => o.order_items.map((i) => ({ ...i, order_id: o.id })))
     .filter((i) => !i.paid && !i.voided);
 
-  const total = items.reduce((sum, i) => sum + (i.unit_price + Number(i.addon_total || 0)) * i.quantity, 0);
-  res.json({ items, total });
+  const subtotal = items.reduce((sum, i) => sum + (i.unit_price + Number(i.addon_total || 0)) * i.quantity, 0);
+
+  // Preview only - payBill recomputes this itself at the actual moment of
+  // payment, this is purely so the customer sees the real total upfront.
+  let discountAmount = 0;
+  let rewardDescription = '';
+
+  const { data: pendingClaim } = await supabaseAdmin
+    .from('loyalty_reward_claims')
+    .select('*')
+    .eq('business_id', business.id)
+    .eq('card_id', tapEvent.card_id)
+    .eq('status', 'pending')
+    .maybeSingle();
+
+  if (pendingClaim) {
+    if (pendingClaim.reward_type === 'percentage') discountAmount = Math.round(subtotal * (Number(pendingClaim.reward_value) / 100) * 100) / 100;
+    else if (pendingClaim.reward_type === 'fixed_amount') discountAmount = Math.min(subtotal, Number(pendingClaim.reward_value));
+    rewardDescription = pendingClaim.reward_description;
+  } else if (req.query.phone) {
+    const { data: program } = await supabaseAdmin.from('loyalty_programs').select('*').eq('business_id', business.id).eq('enabled', true).maybeSingle();
+    if (program && program.structure === 'tiered') {
+      const { data: customer } = await supabaseAdmin.from('customers').select('id').eq('phone', req.query.phone).maybeSingle();
+      if (customer) {
+        const { data: membership } = await supabaseAdmin.from('loyalty_memberships').select('*').eq('business_id', business.id).eq('customer_id', customer.id).maybeSingle();
+        if (membership) {
+          const tier = getCurrentTier(program, membership);
+          if (tier && tier.rewardType !== 'manual') {
+            discountAmount = tier.rewardType === 'percentage' ? Math.round(subtotal * (Number(tier.rewardValue) / 100) * 100) / 100 : Math.min(subtotal, Number(tier.rewardValue));
+            rewardDescription = tier.rewardDescription || `${tier.name} tier discount`;
+          }
+        }
+      }
+    }
+  }
+
+  const total = Math.max(0, subtotal - discountAmount);
+  res.json({ items, total, subtotal, discountAmount, rewardDescription });
 });
 
 // @route POST /api/public/business/:slug/bill/pay
@@ -871,7 +1006,52 @@ const payBill = asyncHandler(async (req, res) => {
   }
 
   const amount = selectedItems.reduce((sum, i) => sum + (i.unit_price + Number(i.addon_total || 0)) * i.quantity, 0);
-  const total = amount + Number(tipAmount || 0);
+
+  // --- Reward auto-application ---
+  // Threshold: a claim the customer already tapped "Claim" for, tied to
+  // THIS specific table - percentage/fixed amounts apply automatically;
+  // a 'manual' reward (free item, etc.) has no number to subtract, so
+  // staff handle it themselves and this just marks it applied for the record.
+  // Tiered: an ongoing discount based on current status, applied every
+  // time automatically - no claim, nothing to mark applied, never resets.
+  let discountAmount = 0;
+  let appliedClaim = null;
+
+  const { data: pendingClaim } = await supabaseAdmin
+    .from('loyalty_reward_claims')
+    .select('*')
+    .eq('business_id', business.id)
+    .eq('card_id', tapEvent.card_id)
+    .eq('status', 'pending')
+    .maybeSingle();
+
+  if (pendingClaim) {
+    appliedClaim = pendingClaim;
+    if (pendingClaim.reward_type === 'percentage') {
+      discountAmount = Math.round(amount * (Number(pendingClaim.reward_value) / 100) * 100) / 100;
+    } else if (pendingClaim.reward_type === 'fixed_amount') {
+      discountAmount = Math.min(amount, Number(pendingClaim.reward_value));
+    }
+  } else if (phone) {
+    const { data: program } = await supabaseAdmin.from('loyalty_programs').select('*').eq('business_id', business.id).eq('enabled', true).maybeSingle();
+    if (program && program.structure === 'tiered') {
+      const { data: customer } = await supabaseAdmin.from('customers').select('id').eq('phone', phone).maybeSingle();
+      if (customer) {
+        const { data: membership } = await supabaseAdmin.from('loyalty_memberships').select('*').eq('business_id', business.id).eq('customer_id', customer.id).maybeSingle();
+        if (membership) {
+          const tier = getCurrentTier(program, membership);
+          if (tier && tier.rewardType !== 'manual') {
+            discountAmount = tier.rewardType === 'percentage'
+              ? Math.round(amount * (Number(tier.rewardValue) / 100) * 100) / 100
+              : Math.min(amount, Number(tier.rewardValue));
+          }
+        }
+      }
+    }
+  }
+
+  const discountedAmount = Math.max(0, amount - discountAmount);
+  const total = discountedAmount + Number(tipAmount || 0);
 
   const { data: integration } = await supabaseAdmin
     .from('pos_integrations')
@@ -894,6 +1074,8 @@ const payBill = asyncHandler(async (req, res) => {
       card_id: tapEvent.card_id,
       order_item_ids: selectedItems.map((i) => i.id),
       amount,
+      discount_amount: discountAmount,
+      reward_claim_id: appliedClaim?.id || null,
       tip_amount: tipAmount || 0,
       status: result.success ? 'completed' : 'failed',
       tap_charge_id: result.chargeId || '',
@@ -912,6 +1094,31 @@ const payBill = asyncHandler(async (req, res) => {
     .from('order_items')
     .update({ paid: true })
     .in('id', selectedItems.map((i) => i.id));
+
+  // A threshold reward only actually resets once it's genuinely used -
+  // tapping "Claim" never touched the membership, this is the real
+  // moment it's spent. Visits/points reset to 0 (not decremented by the
+  // threshold), matching the existing redeem behavior - any surplus
+  // beyond the exact threshold is intentionally kept, not lost.
+  if (appliedClaim) {
+    await supabaseAdmin.from('loyalty_reward_claims').update({ status: 'applied', applied_to_payment_id: payment.id, applied_at: new Date().toISOString() }).eq('id', appliedClaim.id);
+
+    const { data: membershipRow } = await supabaseAdmin.from('loyalty_memberships').select('*').eq('id', appliedClaim.membership_id).maybeSingle();
+    if (membershipRow) {
+      const { data: claimProgram } = await supabaseAdmin.from('loyalty_programs').select('*').eq('business_id', business.id).maybeSingle();
+      const resetUpdate = claimProgram?.earn_method === 'spend'
+        ? { total_spend: 0 }
+        : claimProgram?.use_points ? { points: 0 } : { visits: 0 };
+      await supabaseAdmin.from('loyalty_memberships').update(resetUpdate).eq('id', membershipRow.id);
+      await supabaseAdmin.from('loyalty_transactions').insert({
+        business_id: business.id,
+        membership_id: membershipRow.id,
+        type: 'redeem',
+        amount: discountAmount,
+        note: `Reward applied at payment (${appliedClaim.reward_description || appliedClaim.reward_type})`,
+      });
+    }
+  }
 
   // Optional spend-based loyalty credit - only if a phone was supplied
   // (already-recognized on this device, same pattern as auto-checkin) and
@@ -965,10 +1172,11 @@ const payBill = asyncHandler(async (req, res) => {
 
   // Digital receipt - itemized with a real VAT breakdown, not just a bare
   // total. Menu prices are treated as VAT-inclusive (standard UAE
-  // practice), so VAT is derived from the total rather than added on top.
-  // English only, per explicit decision - not run through translation.
-  const vatAmount = Math.round((amount - amount / (1 + UAE_VAT_RATE)) * 100) / 100;
-  const subtotalExVat = Math.round((amount - vatAmount) * 100) / 100;
+  // practice), so VAT is derived from the (post-discount) amount rather
+  // than added on top. English only, per explicit decision - not run
+  // through translation.
+  const vatAmount = Math.round((discountedAmount - discountedAmount / (1 + UAE_VAT_RATE)) * 100) / 100;
+  const subtotalExVat = Math.round((discountedAmount - vatAmount) * 100) / 100;
 
   const receipt = {
     items: selectedItems.map((i) => ({
@@ -981,6 +1189,8 @@ const payBill = asyncHandler(async (req, res) => {
     subtotalExVat,
     vatAmount,
     vatRate: UAE_VAT_RATE,
+    discountAmount,
+    rewardDescription: appliedClaim?.reward_description || '',
     tip: Number(tipAmount || 0),
     total,
     paidAt: payment.created_at,
@@ -996,6 +1206,7 @@ module.exports = {
   logPublicEvent,
   loyaltyCheckin,
   loyaltyStatus,
+  claimReward,
   getPublicMenu,
   submitOrder,
   getPublicServices,
