@@ -47,7 +47,16 @@ function streamPdf(res, filename, title, columns, rows) {
   const usableWidth = doc.page.width - 80;
   const totalWeight = columns.reduce((sum, c) => sum + (c.weight || 1), 0);
   const widths = columns.map((c) => ((c.weight || 1) / totalWeight) * usableWidth);
-  const xPositions = widths.reduce((acc, w, i) => [...acc, (acc[i - 1] ?? 40) + (i === 0 ? 0 : widths[i - 1])], [40]);
+  // Simple running total - each column starts where the previous one
+  // ends. The earlier version's reduce formula had an off-by-one that
+  // put the first two columns at the exact same x-coordinate, which is
+  // exactly what caused the overlapping/garbled text.
+  const xPositions = [];
+  let cursor = 40;
+  for (const w of widths) {
+    xPositions.push(cursor);
+    cursor += w;
+  }
 
   function drawHeader() {
     doc.fontSize(9).fillColor('#fff');

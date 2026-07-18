@@ -14,13 +14,14 @@ const listCustomButtons = asyncHandler(async (req, res) => {
 
 // @route POST /api/businesses/:businessId/custom-buttons
 const createCustomButton = asyncHandler(async (req, res) => {
-  const { label, icon, url, sortOrder = 0 } = req.body;
+  const { label, icon, imageUrl, url, sortOrder = 0 } = req.body;
   const { data, error } = await req.supabase
     .from('custom_buttons')
     .insert({
       business_id: req.params.businessId,
       label,
-      icon: icon || 'Link',
+      icon: icon || 'link',
+      image_url: imageUrl || null,
       url: url || '',
       sort_order: sortOrder,
     })
@@ -33,10 +34,11 @@ const createCustomButton = asyncHandler(async (req, res) => {
 
 // @route PATCH /api/businesses/:businessId/custom-buttons/:buttonId
 const updateCustomButton = asyncHandler(async (req, res) => {
-  const { label, icon, url, enabled, sortOrder } = req.body;
+  const { label, icon, imageUrl, url, enabled, sortOrder } = req.body;
   const update = {};
   if (label !== undefined) update.label = label;
   if (icon !== undefined) update.icon = icon;
+  if (imageUrl !== undefined) update.image_url = imageUrl;
   if (url !== undefined) update.url = url;
   if (enabled !== undefined) update.enabled = enabled;
   if (sortOrder !== undefined) update.sort_order = sortOrder;
