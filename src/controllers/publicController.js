@@ -186,7 +186,7 @@ const getPublicBusiness = asyncHandler(async (req, res) => {
   // fetched alongside and merged into the response for the frontend's
   // convenience. `program` is null if the business hasn't enabled loyalty.
   const [{ data: program }, { data: paymentIntegration }, { data: customButtons }] = await Promise.all([
-    supabaseAdmin.from('loyalty_programs').select('type, config').eq('business_id', business.id).eq('enabled', true).maybeSingle(),
+    supabaseAdmin.from('loyalty_programs').select('*').eq('business_id', business.id).eq('enabled', true).maybeSingle(),
     supabaseAdmin.from('pos_integrations').select('enabled').eq('business_id', business.id).eq('purpose', 'payment').eq('enabled', true).maybeSingle(),
     supabaseAdmin.from('custom_buttons').select('*').eq('business_id', business.id).eq('enabled', true).order('sort_order'),
   ]);

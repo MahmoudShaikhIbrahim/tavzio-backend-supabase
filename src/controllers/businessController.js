@@ -49,11 +49,16 @@ const updateBusiness = asyncHandler(async (req, res) => {
     const merged = { ...existing.links };
     for (const key of Object.keys(links)) {
       if (!merged[key]) continue; // ignore unknown/removed link keys entirely
-      // Owner can only ever change `value` here - `enabled` is exclusively
-      // written by setBusinessFeatures below, even if a caller tries to
-      // sneak it into this payload.
-      const { value } = links[key];
-      merged[key] = { ...merged[key], ...(value !== undefined ? { value } : {}) };
+      // Owner/staff control both fields directly now - each link has its
+      // own visible on/off toggle in the dashboard, so this is an
+      // explicit choice, not something that silently flips on just
+      // because a value happens to be present.
+      const { value, enabled } = links[key];
+      merged[key] = {
+        ...merged[key],
+        ...(value !== undefined ? { value } : {}),
+        ...(enabled !== undefined ? { enabled } : {}),
+      };
     }
     update.links = merged;
   }
