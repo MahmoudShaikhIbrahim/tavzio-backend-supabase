@@ -49,15 +49,17 @@ const updateBusiness = asyncHandler(async (req, res) => {
     const merged = { ...existing.links };
     for (const key of Object.keys(links)) {
       if (!merged[key]) continue; // ignore unknown/removed link keys entirely
-      // Owner/staff control value, enabled, and icon directly now - each
-      // link has its own visible on/off toggle and icon picker in the
-      // dashboard, so these are explicit choices, not silent defaults.
-      const { value, enabled, icon } = links[key];
+      // Owner/staff control value, enabled, icon, label, and image
+      // directly now - every one of these is an explicit choice made in
+      // the dashboard, not a silent default.
+      const { value, enabled, icon, label, imageUrl } = links[key];
       merged[key] = {
         ...merged[key],
         ...(value !== undefined ? { value } : {}),
         ...(enabled !== undefined ? { enabled } : {}),
         ...(icon !== undefined ? { icon } : {}),
+        ...(label !== undefined ? { label } : {}),
+        ...(imageUrl !== undefined ? { imageUrl } : {}),
       };
     }
     update.links = merged;
