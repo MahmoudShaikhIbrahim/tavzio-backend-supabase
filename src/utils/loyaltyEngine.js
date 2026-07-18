@@ -32,7 +32,7 @@ function isThresholdReady(program, membership) {
     return measure >= threshold;
   }
   const required = cfg.visitsRequired || 10;
-  return measure > 0 && measure % required === 0;
+  return measure >= required;
 }
 
 // Tiered structure only - which tier (if any) this member currently
