@@ -120,8 +120,11 @@ const exportOrders = asyncHandler(async (req, res) => {
       net,
       vat,
       total: order.total,
-      status: order.status,
-      voided: order.voided ? 'Yes' : 'No',
+      // A voided order showing its old kitchen-workflow status (still
+      // "pending" if it was voided before ever being started) reads as
+      // contradictory next to items all marked "(voided)" - this makes
+      // the one thing that actually matters clear at a glance.
+      status: order.voided ? 'Voided' : order.status,
       orderId: order.id,
     };
   });
@@ -134,7 +137,6 @@ const exportOrders = asyncHandler(async (req, res) => {
     { label: 'VAT (5%)', value: (r) => r.vat, weight: 0.8 },
     { label: 'Total', value: (r) => r.total, weight: 0.8 },
     { label: 'Status', value: (r) => r.status, weight: 0.9 },
-    { label: 'Voided', value: (r) => r.voided, weight: 0.7 },
   ];
 
   if (format === 'pdf') {
@@ -149,7 +151,8 @@ const exportOrders = asyncHandler(async (req, res) => {
       const lineGross = (Number(item.unit_price) + Number(item.addon_total || 0)) * item.quantity;
       const { net, vat } = vatBreakdown(lineGross);
       return {
-        orderId: order.id, date: order.created_at, table: order.table_label, status: order.status,
+        orderId: order.id, date: order.created_at, table: order.table_label,
+        status: order.voided ? 'Voided' : order.status,
         voided: order.voided || item.voided, itemName: item.item_name, quantity: item.quantity,
         unitPrice: item.unit_price, lineTotalNet: net, lineTotalVat: vat,
         lineTotalGross: lineGross.toFixed(2), orderTotal: order.total,

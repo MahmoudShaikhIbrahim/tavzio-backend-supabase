@@ -147,6 +147,26 @@ const me = asyncHandler(async (req, res) => {
   res.json(req.user); // populated by the `protect` middleware from `profiles`
 });
 
+// @route PATCH /api/auth/theme
+// Body: { theme: 'light' | 'dark' | 'system' }
+// Scoped to the caller's own account only - nobody can set anyone else's.
+const updateMyTheme = asyncHandler(async (req, res) => {
+  const { theme } = req.body;
+  if (!['light', 'dark', 'system'].includes(theme)) {
+    return res.status(400).json({ message: 'Invalid theme' });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('profiles')
+    .update({ theme_preference: theme })
+    .eq('id', req.user.id)
+    .select('id, name, role, business_id, is_active, theme_preference')
+    .single();
+
+  if (error) return res.status(400).json({ message: error.message });
+  res.json(data);
+});
+
 // @route GET /api/auth/confirm-device/:pendingId
 // Opened from the confirmation email link, on the same device that
 // triggered it. Marks the device trusted for next time and completes login.
@@ -202,4 +222,4 @@ const confirmDevice = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { register, login, refresh, me, confirmDevice };
+module.exports = { register, login, refresh, me, updateMyTheme, confirmDevice };
