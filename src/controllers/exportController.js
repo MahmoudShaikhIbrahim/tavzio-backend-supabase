@@ -59,11 +59,11 @@ function streamPdf(res, filename, title, columns, rows) {
   }
 
   function drawHeader() {
-    doc.fontSize(9).fillColor('#fff');
-    doc.rect(40, doc.y, usableWidth, 18).fill('#333');
-    const headerY = doc.y - 18 + 5;
-    columns.forEach((c, i) => doc.fillColor('#fff').text(c.label, xPositions[i] + 4, headerY, { width: widths[i] - 8 }));
-    doc.moveDown(1.2);
+    const headerTop = doc.y;
+    doc.rect(40, headerTop, usableWidth, 18).fill('#333');
+    doc.fontSize(9);
+    columns.forEach((c, i) => doc.fillColor('#fff').text(c.label, xPositions[i] + 4, headerTop + 5, { width: widths[i] - 8 }));
+    doc.y = headerTop + 18 + 4; // explicitly past the band - no guessing via moveDown
     doc.fillColor('#000');
   }
 
