@@ -259,13 +259,16 @@ const exportPayments = asyncHandler(async (req, res) => {
 });
 
 // @route GET /api/businesses/:businessId/payments
-// Plain list for the dashboard's Payments view (not an export) - completed
-// payments only, most recent first.
+// Plain list for the dashboard's Payments view (not an export) - shows
+// completed and failed payments; excludes 'pending' rows, which are
+// redirect payments the customer never finished (abandoned on the
+// provider's page) - noise, not history.
 const listPayments = asyncHandler(async (req, res) => {
   const { data, error } = await req.supabase
     .from('payments')
     .select('*')
     .eq('business_id', req.params.businessId)
+    .neq('status', 'pending')
     .order('created_at', { ascending: false })
     .limit(200);
 

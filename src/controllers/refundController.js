@@ -39,8 +39,27 @@ const refundPayment = asyncHandler(async (req, res) => {
     .maybeSingle();
   if (!integration) return res.status(404).json({ message: 'Payment integration not configured' });
 
-  const { createRefund } = require('../utils/tapPaymentsAdapter');
-  const result = await createRefund(integration.config, payment.tap_charge_id, refundAmount, reason);
+  // Telr alone stays dashboard-only: their refund endpoint returns an
+  // unstructured non-JSON response whose format couldn't be verified,
+  // and their transaction-management API needs separate enablement on
+  // the merchant account - real-money code doesn't get written against
+  // an unverified response format. Tap and N-Genius refunds are both
+  // built on their verified APIs.
+  const paymentProvider = payment.provider || 'tap';
+  if (paymentProvider === 'telr') {
+    return res.status(400).json({
+      message: "Refunds for Telr payments are done in Telr's own dashboard, not from here",
+    });
+  }
+
+  let result;
+  if (paymentProvider === 'ngenius') {
+    const { createRefund } = require('../utils/ngeniusAdapter');
+    result = await createRefund(integration.config, payment.provider_ref, refundAmount);
+  } else {
+    const { createRefund } = require('../utils/tapPaymentsAdapter');
+    result = await createRefund(integration.config, payment.tap_charge_id, refundAmount, reason);
+  }
   if (!result.success) {
     return res.status(402).json({ message: result.error || 'Refund could not be processed' });
   }

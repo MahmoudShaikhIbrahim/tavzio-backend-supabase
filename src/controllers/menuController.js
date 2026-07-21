@@ -1,4 +1,5 @@
 const asyncHandler = require('../utils/asyncHandler');
+const { translateToAllLanguages } = require('../utils/translate');
 
 // @route GET /api/businesses/:businessId/menu/categories
 const listCategories = asyncHandler(async (req, res) => {
@@ -15,9 +16,10 @@ const listCategories = asyncHandler(async (req, res) => {
 // @route POST /api/businesses/:businessId/menu/categories
 const createCategory = asyncHandler(async (req, res) => {
   const { name, sortOrder = 0 } = req.body;
+  const nameI18n = await translateToAllLanguages(name).catch(() => ({}));
   const { data, error } = await req.supabase
     .from('menu_categories')
-    .insert({ business_id: req.params.businessId, name, sort_order: sortOrder })
+    .insert({ business_id: req.params.businessId, name, sort_order: sortOrder, name_i18n: nameI18n })
     .select()
     .single();
 
@@ -27,10 +29,14 @@ const createCategory = asyncHandler(async (req, res) => {
 
 // @route PATCH /api/businesses/:businessId/menu/categories/:categoryId
 const updateCategory = asyncHandler(async (req, res) => {
-  const { name, sortOrder } = req.body;
+  const { name, sortOrder, paused } = req.body;
   const update = {};
-  if (name !== undefined) update.name = name;
+  if (name !== undefined) {
+    update.name = name;
+    update.name_i18n = await translateToAllLanguages(name).catch(() => ({}));
+  }
   if (sortOrder !== undefined) update.sort_order = sortOrder;
+  if (paused !== undefined) update.paused = !!paused;
 
   const { data, error } = await req.supabase
     .from('menu_categories')
@@ -72,13 +78,19 @@ const listItems = asyncHandler(async (req, res) => {
 // @route POST /api/businesses/:businessId/menu/items
 const createItem = asyncHandler(async (req, res) => {
   const { categoryId, name, description, price, imageUrl, sortOrder = 0 } = req.body;
+  const [nameI18n, descriptionI18n] = await Promise.all([
+    translateToAllLanguages(name).catch(() => ({})),
+    translateToAllLanguages(description).catch(() => ({})),
+  ]);
   const { data, error } = await req.supabase
     .from('menu_items')
     .insert({
       business_id: req.params.businessId,
       category_id: categoryId || null,
       name,
+      name_i18n: nameI18n,
       description: description || '',
+      description_i18n: descriptionI18n,
       price: price || 0,
       image_url: imageUrl || '',
       sort_order: sortOrder,
@@ -95,8 +107,14 @@ const updateItem = asyncHandler(async (req, res) => {
   const { categoryId, name, description, price, imageUrl, isAvailable, sortOrder } = req.body;
   const update = {};
   if (categoryId !== undefined) update.category_id = categoryId;
-  if (name !== undefined) update.name = name;
-  if (description !== undefined) update.description = description;
+  if (name !== undefined) {
+    update.name = name;
+    update.name_i18n = await translateToAllLanguages(name).catch(() => ({}));
+  }
+  if (description !== undefined) {
+    update.description = description;
+    update.description_i18n = await translateToAllLanguages(description).catch(() => ({}));
+  }
   if (price !== undefined) update.price = price;
   if (imageUrl !== undefined) update.image_url = imageUrl;
   if (isAvailable !== undefined) update.is_available = isAvailable;

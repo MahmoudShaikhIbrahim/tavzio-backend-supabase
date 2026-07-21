@@ -1,4 +1,5 @@
 const asyncHandler = require('../utils/asyncHandler');
+const { translateToAllLanguages } = require('../utils/translate');
 const { getCurrentTier, isThresholdReady } = require('../utils/loyaltyEngine');
 
 // @route GET /api/businesses/:businessId/loyalty/program
@@ -27,6 +28,8 @@ const upsertProgram = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Invalid reward type' });
   }
 
+  const rewardDescriptionI18n = await translateToAllLanguages(rewardDescription).catch(() => ({}));
+
   const { data, error } = await req.supabase
     .from('loyalty_programs')
     .upsert(
@@ -38,6 +41,7 @@ const upsertProgram = asyncHandler(async (req, res) => {
         reward_type: rewardType || 'manual',
         reward_value: rewardValue || 0,
         reward_description: rewardDescription || '',
+        reward_description_i18n: rewardDescriptionI18n,
         enabled: !!enabled,
         config: config || {},
       },

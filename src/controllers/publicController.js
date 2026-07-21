@@ -1,6 +1,7 @@
 const { supabaseAdmin, supabasePublic } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 const { notifyCardUsed, sendDeviceConfirmation } = require('../utils/notifications');
+const { resolveText } = require('../utils/translate');
 
 function detectDevice(userAgent = '') {
   const ua = userAgent.toLowerCase();
@@ -171,9 +172,10 @@ const resolveCardTap = asyncHandler(async (req, res) => {
 
 // @route GET /api/public/business/:slug
 const getPublicBusiness = asyncHandler(async (req, res) => {
+  const lang = req.query.lang || 'en';
   const { data: business, error } = await supabaseAdmin
     .from('businesses')
-    .select('id, name, slug, logo_url, cover_image_url, description, links, theme, category, features')
+    .select('id, name, slug, logo_url, cover_image_url, description, description_i18n, links, theme, category, features')
     .eq('slug', req.params.slug)
     .eq('status', 'active')
     .single();
@@ -187,15 +189,19 @@ const getPublicBusiness = asyncHandler(async (req, res) => {
   // convenience. `program` is null if the business hasn't enabled loyalty.
   const [{ data: program }, { data: paymentIntegration }, { data: customButtons }] = await Promise.all([
     supabaseAdmin.from('loyalty_programs').select('*').eq('business_id', business.id).eq('enabled', true).maybeSingle(),
-    supabaseAdmin.from('pos_integrations').select('enabled').eq('business_id', business.id).eq('purpose', 'payment').eq('enabled', true).maybeSingle(),
+    supabaseAdmin.from('pos_integrations').select('enabled, config').eq('business_id', business.id).eq('purpose', 'payment').eq('enabled', true).maybeSingle(),
     supabaseAdmin.from('custom_buttons').select('*').eq('business_id', business.id).eq('enabled', true).order('sort_order'),
   ]);
 
   res.json({
     ...business,
-    loyaltyProgram: program || null,
+    description: resolveText(business.description, business.description_i18n, lang),
+    loyaltyProgram: program
+      ? { ...program, reward_description: resolveText(program.reward_description, program.reward_description_i18n, lang) }
+      : null,
     paymentEnabled: !!paymentIntegration,
-    customButtons: customButtons || [],
+    paymentProvider: paymentIntegration?.config?.provider || 'tap',
+    customButtons: (customButtons || []).map((b) => ({ ...b, label: resolveText(b.label, b.label_i18n, lang) })),
   });
 });
 
@@ -553,9 +559,10 @@ const claimReward = asyncHandler(async (req, res) => {
 // @route GET /api/public/business/:slug/menu
 // Only returns data if ordering.menuView is enabled - matches the RLS rule.
 const getPublicMenu = asyncHandler(async (req, res) => {
+  const lang = req.query.lang || 'en';
   const { data: business } = await supabaseAdmin
     .from('businesses')
-    .select('id, features')
+    .select('id, features, ordering_paused')
     .eq('slug', req.params.slug)
     .eq('status', 'active')
     .single();
@@ -566,7 +573,10 @@ const getPublicMenu = asyncHandler(async (req, res) => {
 
   const [{ data: categories }, { data: items }] = await Promise.all([
     supabaseAdmin.from('menu_categories').select('*').eq('business_id', business.id).order('sort_order'),
-    supabaseAdmin.from('menu_items').select('*').eq('business_id', business.id).eq('is_available', true).order('sort_order'),
+    // No longer filtered to is_available=true - unavailable items now
+    // stay visible on the customer side (grayed out, can't be ordered)
+    // rather than disappearing entirely.
+    supabaseAdmin.from('menu_items').select('*').eq('business_id', business.id).order('sort_order'),
   ]);
 
   // Attach each item's add-ons, if it has any - one extra query rather
@@ -584,13 +594,23 @@ const getPublicMenu = asyncHandler(async (req, res) => {
       return acc;
     }, {});
   }
-  const itemsWithAddons = (items || []).map((i) => ({ ...i, addons: addonsByItem[i.id] || [] }));
+  const itemsWithAddons = (items || []).map((i) => ({
+    ...i,
+    name: resolveText(i.name, i.name_i18n, lang),
+    description: resolveText(i.description, i.description_i18n, lang),
+    addons: addonsByItem[i.id] || [],
+  }));
+  const translatedCategories = (categories || []).map((c) => ({
+    ...c,
+    name: resolveText(c.name, c.name_i18n, lang),
+  }));
 
   // Tells the frontend whether this is a read-only menu (menuView on,
   // submission off - browse only, no cart) or the full cart flow.
   res.json({
-    categories: categories || [],
+    categories: translatedCategories,
     items: itemsWithAddons,
+    orderingPaused: !!business.ordering_paused,
     submissionEnabled: !!business.features?.ordering?.submission,
     callWaiterEnabled: !!business.features?.ordering?.callWaiter,
     requestBillEnabled: !!business.features?.ordering?.requestBill,
@@ -616,11 +636,15 @@ const submitOrder = asyncHandler(async (req, res) => {
 
   const { data: business } = await supabaseAdmin
     .from('businesses')
-    .select('id, features')
+    .select('id, features, ordering_paused')
     .eq('slug', req.params.slug)
     .eq('status', 'active')
     .single();
   if (!business) return res.status(404).json({ message: 'Business not found' });
+
+  if (requestType === 'order' && business.ordering_paused) {
+    return res.status(400).json({ message: 'Ordering is currently paused' });
+  }
 
   const featureFlag =
     requestType === 'call_waiter' ? business.features?.ordering?.callWaiter :
@@ -659,13 +683,28 @@ const submitOrder = asyncHandler(async (req, res) => {
     const menuItemIds = items.map((i) => i.menuItemId);
     const { data: menuItems } = await supabaseAdmin
       .from('menu_items')
-      .select('id, name, price')
+      .select('id, name, price, category_id')
       .in('id', menuItemIds)
       .eq('business_id', business.id)
       .eq('is_available', true);
 
     if (!menuItems || menuItems.length !== menuItemIds.length) {
       return res.status(400).json({ message: 'One or more items are no longer available' });
+    }
+
+    // Same check as the individual is_available flag, but for the
+    // category-wide pause toggle - a paused category should reject a
+    // stale order just as firmly as a sold-out single item would.
+    const categoryIds = [...new Set(menuItems.map((m) => m.category_id).filter(Boolean))];
+    if (categoryIds.length > 0) {
+      const { data: pausedCategories } = await supabaseAdmin
+        .from('menu_categories')
+        .select('id')
+        .in('id', categoryIds)
+        .eq('paused', true);
+      if (pausedCategories && pausedCategories.length > 0) {
+        return res.status(400).json({ message: 'One or more items are no longer available' });
+      }
     }
 
     // Look up every requested add-on server-side too - never trust a
@@ -960,19 +999,23 @@ const getBill = asyncHandler(async (req, res) => {
 // way, any customer can select any combination, including items someone
 // else ordered (people cover each other's food often) - never auto-split
 // by who tapped or who ordered.
-const payBill = asyncHandler(async (req, res) => {
-  const { tapEventId, itemIds, tipAmount = 0, tapToken, phone } = req.body;
-  if (!tapEventId || !tapToken) {
-    return res.status(400).json({ message: 'tapEventId and tapToken are required' });
-  }
+// =========================================================================
+// Shared bill-payment core - used by BOTH the instant Tap flow (payBill)
+// and the redirect flow (createPaySession/confirmPaySession), so the
+// pricing, loyalty, and receipt logic can never drift between providers.
+// =========================================================================
 
+// Everything needed to charge a bill: validates the tap, gathers unpaid
+// items, applies loyalty discounts, and loads the payment integration.
+// Returns { errStatus, errMessage } on any failure.
+async function computeBillContext(slug, tapEventId, itemIds, tipAmount, phone) {
   const { data: business } = await supabaseAdmin
     .from('businesses')
     .select('id, features')
-    .eq('slug', req.params.slug)
+    .eq('slug', slug)
     .eq('status', 'active')
     .single();
-  if (!business) return res.status(404).json({ message: 'Business not found' });
+  if (!business) return { errStatus: 404, errMessage: 'Business not found' };
 
   const cutoff = new Date(Date.now() - TAP_TOKEN_VALID_MINUTES * 60 * 1000).toISOString();
   const { data: tapEvent } = await supabaseAdmin
@@ -984,7 +1027,7 @@ const payBill = asyncHandler(async (req, res) => {
     .gte('created_at', cutoff)
     .maybeSingle();
   if (!tapEvent || !tapEvent.card_id) {
-    return res.status(400).json({ message: 'Payment must follow a real tap, and this one has expired or is invalid' });
+    return { errStatus: 400, errMessage: 'Payment must follow a real tap, and this one has expired or is invalid' };
   }
 
   const { data: orders } = await supabaseAdmin
@@ -1002,7 +1045,7 @@ const payBill = asyncHandler(async (req, res) => {
     : unpaidItems;
 
   if (selectedItems.length === 0) {
-    return res.status(400).json({ message: 'Nothing to pay' });
+    return { errStatus: 400, errMessage: 'Nothing to pay' };
   }
 
   const amount = selectedItems.reduce((sum, i) => sum + (i.unit_price + Number(i.addon_total || 0)) * i.quantity, 0);
@@ -1061,35 +1104,16 @@ const payBill = asyncHandler(async (req, res) => {
     .eq('enabled', true)
     .maybeSingle();
   if (!integration) {
-    return res.status(404).json({ message: 'Payment is not available for this business yet' });
+    return { errStatus: 404, errMessage: 'Payment is not available for this business yet' };
   }
 
-  const { createCharge } = require('../utils/tapPaymentsAdapter');
-  const result = await createCharge(integration.config, tapToken, total, 'Tavzio bill payment');
+  return { business, tapEvent, selectedItems, amount, discountAmount, discountedAmount, appliedClaim, total, integration };
+}
 
-  const { data: payment, error: paymentError } = await supabaseAdmin
-    .from('payments')
-    .insert({
-      business_id: business.id,
-      card_id: tapEvent.card_id,
-      order_item_ids: selectedItems.map((i) => i.id),
-      amount,
-      discount_amount: discountAmount,
-      reward_claim_id: appliedClaim?.id || null,
-      tip_amount: tipAmount || 0,
-      status: result.success ? 'completed' : 'failed',
-      tap_charge_id: result.chargeId || '',
-      failure_reason: result.error || '',
-      source_event_id: tapEventId,
-    })
-    .select()
-    .single();
-  if (paymentError) return res.status(400).json({ message: paymentError.message });
-
-  if (!result.success) {
-    return res.status(402).json({ message: result.error || 'Payment failed', payment });
-  }
-
+// Everything that must happen once a bill payment has GENUINELY succeeded
+// (verified server-side, never assumed): mark items paid, apply/reset the
+// loyalty claim, credit spend-based loyalty, and build the receipt.
+async function finalizePaidBill({ business, payment, selectedItems, appliedClaim, discountAmount, discountedAmount, amount, tipAmount, phone, total }) {
   await supabaseAdmin
     .from('order_items')
     .update({ paid: true })
@@ -1130,7 +1154,7 @@ const payBill = asyncHandler(async (req, res) => {
       .select('*')
       .eq('business_id', business.id)
       .eq('enabled', true)
-      .eq('type', 'spend')
+      .eq('earn_method', 'spend')
       .maybeSingle();
 
     if (program) {
@@ -1197,7 +1221,200 @@ const payBill = asyncHandler(async (req, res) => {
     paymentId: payment.id,
   };
 
+
+  return receipt;
+}
+
+const payBill = asyncHandler(async (req, res) => {
+  const { tapEventId, itemIds, tipAmount = 0, tapToken, phone } = req.body;
+  if (!tapEventId || !tapToken) {
+    return res.status(400).json({ message: 'tapEventId and tapToken are required' });
+  }
+
+  const ctx = await computeBillContext(req.params.slug, tapEventId, itemIds, tipAmount, phone);
+  if (ctx.errStatus) return res.status(ctx.errStatus).json({ message: ctx.errMessage });
+  const { business, tapEvent, selectedItems, amount, discountAmount, discountedAmount, appliedClaim, total, integration } = ctx;
+
+  // Tap is the in-page provider (Apple/Google Pay token) - a business
+  // configured for a redirect provider can't take a token payment.
+  const provider = integration.config?.provider || 'tap';
+  if (provider !== 'tap') {
+    return res.status(400).json({ message: 'This business uses redirect-based payment - use the payment session flow' });
+  }
+
+  const { createCharge } = require('../utils/tapPaymentsAdapter');
+  const result = await createCharge(integration.config, tapToken, total, 'Tavzio bill payment');
+
+  const { data: payment, error: paymentError } = await supabaseAdmin
+    .from('payments')
+    .insert({
+      business_id: business.id,
+      card_id: tapEvent.card_id,
+      order_item_ids: selectedItems.map((i) => i.id),
+      amount,
+      discount_amount: discountAmount,
+      reward_claim_id: appliedClaim?.id || null,
+      tip_amount: tipAmount || 0,
+      status: result.success ? 'completed' : 'failed',
+      provider: 'tap',
+      tap_charge_id: result.chargeId || '',
+      failure_reason: result.error || '',
+      source_event_id: tapEventId,
+    })
+    .select()
+    .single();
+  if (paymentError) return res.status(400).json({ message: paymentError.message });
+
+  if (!result.success) {
+    return res.status(402).json({ message: result.error || 'Payment failed', payment });
+  }
+
+  const receipt = await finalizePaidBill({ business, payment, selectedItems, appliedClaim, discountAmount, discountedAmount, amount, tipAmount, phone, total });
+
   res.status(201).json({ payment, receipt });
+});
+
+// @route POST /api/public/business/:slug/bill/pay-session
+// Redirect providers (Telr, N-Genius): computes the exact same bill as
+// payBill would, records a 'pending' payment, and returns the provider's
+// hosted page URL for the customer to pay on. Nothing is marked paid
+// here - only confirmPaySession does that, after real verification.
+const createPaySession = asyncHandler(async (req, res) => {
+  const { tapEventId, itemIds, tipAmount = 0, phone } = req.body;
+  if (!tapEventId) {
+    return res.status(400).json({ message: 'tapEventId is required' });
+  }
+
+  const ctx = await computeBillContext(req.params.slug, tapEventId, itemIds, tipAmount, phone);
+  if (ctx.errStatus) return res.status(ctx.errStatus).json({ message: ctx.errMessage });
+  const { business, tapEvent, selectedItems, amount, discountAmount, appliedClaim, total, integration } = ctx;
+
+  const provider = integration.config?.provider;
+  if (provider !== 'telr' && provider !== 'ngenius') {
+    return res.status(400).json({ message: 'This business does not use redirect-based payment' });
+  }
+
+  // Record first, so the payment id can ride along in the return URL and
+  // the confirm step knows exactly which pending payment to verify.
+  const { data: payment, error: paymentError } = await supabaseAdmin
+    .from('payments')
+    .insert({
+      business_id: business.id,
+      card_id: tapEvent.card_id,
+      order_item_ids: selectedItems.map((i) => i.id),
+      amount,
+      discount_amount: discountAmount,
+      reward_claim_id: appliedClaim?.id || null,
+      tip_amount: tipAmount || 0,
+      status: 'pending',
+      provider,
+      source_event_id: tapEventId,
+    })
+    .select()
+    .single();
+  if (paymentError) return res.status(400).json({ message: paymentError.message });
+
+  const returnUrl = `${process.env.CLIENT_URL}/${req.params.slug}/pay?paymentId=${payment.id}`;
+  const adapter = provider === 'telr'
+    ? require('../utils/telrAdapter')
+    : require('../utils/ngeniusAdapter');
+
+  const session = await adapter.createPaymentSession(integration.config, total, 'Tavzio bill payment', payment.id, returnUrl);
+  if (!session.success) {
+    await supabaseAdmin.from('payments').update({ status: 'failed', failure_reason: session.error || '' }).eq('id', payment.id);
+    return res.status(502).json({ message: session.error || 'Could not start the payment' });
+  }
+
+  await supabaseAdmin.from('payments').update({ provider_ref: session.providerRef }).eq('id', payment.id);
+  res.status(201).json({ paymentId: payment.id, redirectUrl: session.redirectUrl });
+});
+
+// @route POST /api/public/business/:slug/bill/confirm
+// Body: { paymentId, phone? }
+// Called when the customer lands back from the provider's page. The
+// provider's own status API is the only source of truth here - which
+// return URL the customer arrived on proves nothing.
+const confirmPaySession = asyncHandler(async (req, res) => {
+  const { paymentId, phone } = req.body;
+  if (!paymentId) return res.status(400).json({ message: 'paymentId is required' });
+
+  const { data: business } = await supabaseAdmin
+    .from('businesses')
+    .select('id, features')
+    .eq('slug', req.params.slug)
+    .eq('status', 'active')
+    .single();
+  if (!business) return res.status(404).json({ message: 'Business not found' });
+
+  const { data: payment } = await supabaseAdmin
+    .from('payments')
+    .select('*')
+    .eq('id', paymentId)
+    .eq('business_id', business.id)
+    .maybeSingle();
+  if (!payment) return res.status(404).json({ message: 'Payment not found' });
+
+  // Already resolved (double-confirm, refresh of the return page) - just
+  // report the final state rather than re-running anything.
+  if (payment.status === 'completed') return res.json({ status: 'completed' });
+  if (payment.status === 'failed') {
+    return res.status(402).json({ message: payment.failure_reason || 'Payment failed', status: 'failed' });
+  }
+
+  const { data: integration } = await supabaseAdmin
+    .from('pos_integrations')
+    .select('*')
+    .eq('business_id', business.id)
+    .eq('purpose', 'payment')
+    .eq('enabled', true)
+    .maybeSingle();
+  if (!integration) return res.status(404).json({ message: 'Payment is not available for this business' });
+
+  const adapter = payment.provider === 'telr'
+    ? require('../utils/telrAdapter')
+    : require('../utils/ngeniusAdapter');
+
+  const check = await adapter.checkPaymentStatus(integration.config, payment.provider_ref);
+  if (!check.success) {
+    // Verification itself failed (network, provider outage) - leave the
+    // payment 'pending' so a retry of this endpoint can still resolve it.
+    return res.status(502).json({ message: check.error || 'Could not verify the payment yet', status: 'pending' });
+  }
+
+  if (!check.paid) {
+    await supabaseAdmin.from('payments').update({ status: 'failed', failure_reason: check.statusText || 'Not authorised' }).eq('id', payment.id);
+    return res.status(402).json({ message: 'Payment was not completed', status: 'failed' });
+  }
+
+  const { data: completed } = await supabaseAdmin
+    .from('payments')
+    .update({ status: 'completed' })
+    .eq('id', payment.id)
+    .select()
+    .single();
+
+  // Rebuild exactly what finalizePaidBill needs from the stored row.
+  const { data: items } = await supabaseAdmin
+    .from('order_items')
+    .select('*')
+    .in('id', payment.order_item_ids || []);
+  let appliedClaim = null;
+  if (payment.reward_claim_id) {
+    const { data: claim } = await supabaseAdmin.from('loyalty_reward_claims').select('*').eq('id', payment.reward_claim_id).maybeSingle();
+    appliedClaim = claim;
+  }
+  const amount = Number(payment.amount);
+  const discountAmount = Number(payment.discount_amount || 0);
+  const discountedAmount = Math.max(0, amount - discountAmount);
+  const tipAmount = Number(payment.tip_amount || 0);
+  const total = discountedAmount + tipAmount;
+
+  const receipt = await finalizePaidBill({
+    business, payment: completed, selectedItems: items || [], appliedClaim,
+    discountAmount, discountedAmount, amount, tipAmount, phone, total,
+  });
+
+  res.json({ status: 'completed', payment: completed, receipt });
 });
 
 module.exports = {
@@ -1213,4 +1430,6 @@ module.exports = {
   submitBooking,
   getBill,
   payBill,
+  createPaySession,
+  confirmPaySession,
 };

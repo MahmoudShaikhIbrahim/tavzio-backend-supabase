@@ -12,6 +12,8 @@ const {
   submitBooking,
   getBill,
   payBill,
+  createPaySession,
+  confirmPaySession,
 } = require('../controllers/publicController');
 
 const router = express.Router();
@@ -28,5 +30,7 @@ router.get('/business/:slug/services', getPublicServices);
 router.post('/business/:slug/bookings', submitBooking);
 router.get('/business/:slug/bill', getBill);
 router.post('/business/:slug/bill/pay', payBill);
+router.post('/business/:slug/bill/pay-session', createPaySession);
+router.post('/business/:slug/bill/confirm', confirmPaySession);
 
 module.exports = router;

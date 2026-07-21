@@ -1,4 +1,5 @@
 const asyncHandler = require('../utils/asyncHandler');
+const { translateToAllLanguages } = require('../utils/translate');
 
 // @route GET /api/businesses/:businessId
 const getBusiness = asyncHandler(async (req, res) => {
@@ -16,7 +17,7 @@ const getBusiness = asyncHandler(async (req, res) => {
 
 // @route PATCH /api/businesses/:businessId
 const updateBusiness = asyncHandler(async (req, res) => {
-  const { name, logoUrl, coverImageUrl, description, category, theme, links, notificationSettings } = req.body;
+  const { name, logoUrl, coverImageUrl, description, category, theme, links, notificationSettings, orderingPaused } = req.body;
 
   const { data: existing, error: fetchError } = await req.supabase
     .from('businesses')
@@ -29,8 +30,12 @@ const updateBusiness = asyncHandler(async (req, res) => {
   if (name !== undefined) update.name = name;
   if (logoUrl !== undefined) update.logo_url = logoUrl;
   if (coverImageUrl !== undefined) update.cover_image_url = coverImageUrl;
-  if (description !== undefined) update.description = description;
+  if (description !== undefined) {
+    update.description = description;
+    update.description_i18n = await translateToAllLanguages(description).catch(() => ({}));
+  }
   if (category !== undefined) update.category = category;
+  if (orderingPaused !== undefined) update.ordering_paused = !!orderingPaused;
   if (theme !== undefined) update.theme = { ...existing.theme, ...theme };
 
   // Each of the 4 notification events is deep-merged individually, same
