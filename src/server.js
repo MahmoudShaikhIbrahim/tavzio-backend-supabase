@@ -11,6 +11,7 @@ const authRoutes = require('./routes/authRoutes');
 const businessRoutes = require('./routes/businessRoutes');
 const publicRoutes = require('./routes/publicRoutes');
 const messagesRoutes = require('./routes/messagesRoutes');
+const ziinaRoutes = require('./routes/ziinaRoutes');
 
 const app = express();
 
@@ -26,7 +27,13 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json());
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 300 });
@@ -38,6 +45,7 @@ app.use('/api/auth', apiLimiter, authRoutes);
 app.use('/api/businesses', apiLimiter, businessRoutes);
 app.use('/api/public', publicLimiter, publicRoutes);
 app.use('/api/messages', apiLimiter, messagesRoutes);
+app.use('/api/ziina', apiLimiter, ziinaRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
