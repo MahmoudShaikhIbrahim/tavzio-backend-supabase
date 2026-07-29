@@ -7,6 +7,7 @@ const {
   setBusinessFeatures,
   deleteBusiness,
 } = require('../controllers/businessController');
+const { getReceiptBranding, updateReceiptBranding } = require('../controllers/receiptController');
 const { protect, authorize, enforceTenant } = require('../middleware/auth');
 const cardRoutes = require('./cardRoutes');
 const analyticsRoutes = require('./analyticsRoutes');
@@ -22,10 +23,16 @@ const paymentsListRoutes = require('./paymentsListRoutes');
 const customButtonRoutes = require('./customButtonRoutes');
 const auditLogRoutes = require('./auditLogRoutes');
 const supportMessageRoutes = require('./supportMessageRoutes');
+const receiptRoutes = require('./receiptRoutes');
 
 const router = express.Router();
 
 router.get('/', protect, authorize('super_admin'), listBusinesses);
+
+// Platform-wide (not tied to any one business) - the currently-active
+// stamp/signature/legal name new receipts will use going forward.
+router.get('/receipt-branding', protect, authorize('super_admin'), getReceiptBranding);
+router.put('/receipt-branding', protect, authorize('super_admin'), updateReceiptBranding);
 
 router.get('/:businessId', protect, enforceTenant, getBusiness);
 router.patch('/:businessId', protect, enforceTenant, updateBusiness);
@@ -54,5 +61,6 @@ router.use('/:businessId/payments', paymentsListRoutes);
 router.use('/:businessId/custom-buttons', customButtonRoutes);
 router.use('/:businessId/audit-log', auditLogRoutes);
 router.use('/:businessId/messages', supportMessageRoutes);
+router.use('/:businessId/receipts', receiptRoutes);
 
 module.exports = router;
