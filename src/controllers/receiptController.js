@@ -269,8 +269,6 @@ const updateReceiptBranding = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
-
-
 // @route POST /api/ziina/webhook
 // The ONE account-wide receiver for every Ziina event, since Ziina only
 // supports a single webhook URL per account (confirmed from their own
@@ -352,6 +350,12 @@ const registerZiinaWebhook = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  listReceipts, createReceipt, voidReceipt, getReceiptPdf, getReceiptBranding, updateReceiptBranding,
-  handleZiinaWebhook, registerZiinaWebhook,
+  listReceipts,
+  createReceipt,
+  voidReceipt,
+  getReceiptPdf,
+  getReceiptBranding,
+  updateReceiptBranding,
+  handleZiinaWebhook,
+  registerZiinaWebhook,
 };
