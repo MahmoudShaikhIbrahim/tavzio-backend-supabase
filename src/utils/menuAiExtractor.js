@@ -73,6 +73,50 @@ function excelToText(buffer) {
   return parts.join('\n\n');
 }
 
+// Second, focused pass for one specific item's photo. The first pass asks
+// for every item's bounding box in one shot while also reading names,
+// prices, and descriptions across a potentially busy, dense grid image -
+// splitting attention across everything at once. This call does one
+// thing only: look at the single region the first pass guessed, and
+// correct it. Isolating the task like this is what actually improves
+// precision, not further prompt wording tweaks on the combined call -
+// real evidence from testing showed the combined-call approach
+// consistently producing undersized/imprecise boxes regardless of how
+// the instructions were worded.
+async function refinePhotoBoundingBox(imageBuffer, itemName, roughBox) {
+  try {
+    const jpegBuffer = await sharp(imageBuffer).jpeg().toBuffer();
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-5',
+      max_tokens: 300,
+      system: `You will be given one image and asked to locate one specific dish's photo within it precisely. Respond with ONLY raw JSON, no markdown, no commentary. If you can clearly find a real photo of the named dish, respond with {"x": 0, "y": 0, "width": 0, "height": 0} as fractions of the image's width/height (x,y = top-left corner), matching the photo's actual visible edges exactly - not smaller, not bleeding into a neighboring item. If you cannot confidently find a distinct photo for this exact dish in this image, respond with {"found": false}.`,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: jpegBuffer.toString('base64') } },
+          {
+            type: 'text',
+            text: `Find the precise photo for the dish "${itemName}". An earlier, less careful pass estimated it was roughly around x=${roughBox.x.toFixed(2)}, y=${roughBox.y.toFixed(2)}, width=${roughBox.width.toFixed(2)}, height=${roughBox.height.toFixed(2)} (as fractions of image size) - use that only as a starting hint, look carefully at the actual image and correct it precisely.`,
+          },
+        ],
+      }],
+    });
+    const textBlock = response.content.find((b) => b.type === 'text');
+    if (!textBlock) return null;
+    const cleaned = textBlock.text.trim().replace(/^```json\s*/i, '').replace(/```\s*$/i, '');
+    const parsed = JSON.parse(cleaned);
+    if (parsed.found === false) return null;
+    if (typeof parsed.x !== 'number' || typeof parsed.width !== 'number') return null;
+    return parsed;
+  } catch {
+    // Refinement is a best-effort improvement - if it fails for any
+    // reason, falling back to the first pass's rough box (still cropped
+    // and still flagged if it comes out small) beats losing the photo
+    // entirely.
+    return null;
+  }
+}
+
 // Crops the bounding box Claude reported out of the ORIGINAL uploaded
 // image and uploads just that crop to Storage - this is what makes a
 // "photo" field a real, usable image URL rather than just coordinates.
@@ -224,6 +268,20 @@ async function extractMenuFromFiles(files, businessId) {
   for (const category of categories) {
     for (const item of category.items || []) {
       if (item.photo && typeof item.photo.imageIndex === 'number') {
+        const sourceBuffer = imageBuffers[item.photo.imageIndex];
+        // Focused refinement pass - corrects the rough guess from the
+        // combined extraction call before it ever gets cropped. If this
+        // fails for any reason, the original rough box is still used
+        // rather than losing the photo entirely.
+        if (sourceBuffer) {
+          const refined = await refinePhotoBoundingBox(sourceBuffer, item.name, item.photo);
+          if (refined) {
+            item.photo.x = refined.x;
+            item.photo.y = refined.y;
+            item.photo.width = refined.width;
+            item.photo.height = refined.height;
+          }
+        }
         const cropResult = await cropAndUploadPhoto(imageBuffers, item.photo, businessId);
         if (cropResult) {
           item.photoUrl = cropResult.url;
