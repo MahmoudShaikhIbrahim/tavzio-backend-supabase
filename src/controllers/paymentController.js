@@ -28,7 +28,7 @@ const upsertPaymentIntegration = asyncHandler(async (req, res) => {
       {
         business_id: req.params.businessId,
         purpose: 'payment',
-        provider: 'tap',
+        provider: config?.provider || 'tap',
         enabled: !!enabled,
         config: config || {},
         status: enabled ? 'connected' : 'disconnected',

@@ -56,6 +56,9 @@ const refundPayment = asyncHandler(async (req, res) => {
   if (paymentProvider === 'ngenius') {
     const { createRefund } = require('../utils/ngeniusAdapter');
     result = await createRefund(integration.config, payment.provider_ref, refundAmount);
+  } else if (paymentProvider === 'ziina') {
+    const { createRefund } = require('../utils/ziinaBillAdapter');
+    result = await createRefund(integration.config, payment.provider_ref, refundAmount);
   } else {
     const { createRefund } = require('../utils/tapPaymentsAdapter');
     result = await createRefund(integration.config, payment.tap_charge_id, refundAmount, reason);

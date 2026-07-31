@@ -949,9 +949,14 @@ const getBill = asyncHandler(async (req, res) => {
     .eq('voided', false)
     .neq('status', 'cancelled');
 
-  const items = (orders || [])
+  const allItems = (orders || [])
     .flatMap((o) => o.order_items.map((i) => ({ ...i, order_id: o.id })))
-    .filter((i) => !i.paid && !i.voided);
+    .filter((i) => !i.voided);
+  const items = allItems.filter((i) => !i.paid);
+  // Shown in a collapsed "Paid" section on the bill page - lets any
+  // diner (including whoever just paid) see what's already settled at a
+  // glance without it cluttering the main payable list.
+  const paidItems = allItems.filter((i) => i.paid);
 
   const subtotal = items.reduce((sum, i) => sum + (i.unit_price + Number(i.addon_total || 0)) * i.quantity, 0);
 
@@ -990,7 +995,7 @@ const getBill = asyncHandler(async (req, res) => {
   }
 
   const total = Math.max(0, subtotal - discountAmount);
-  res.json({ items, total, subtotal, discountAmount, rewardDescription });
+  res.json({ items, paidItems, total, subtotal, discountAmount, rewardDescription });
 });
 
 // @route POST /api/public/business/:slug/bill/pay
@@ -1290,7 +1295,7 @@ const createPaySession = asyncHandler(async (req, res) => {
   const { business, tapEvent, selectedItems, amount, discountAmount, appliedClaim, total, integration } = ctx;
 
   const provider = integration.config?.provider;
-  if (provider !== 'telr' && provider !== 'ngenius') {
+  if (provider !== 'telr' && provider !== 'ngenius' && provider !== 'ziina') {
     return res.status(400).json({ message: 'This business does not use redirect-based payment' });
   }
 
@@ -1317,7 +1322,9 @@ const createPaySession = asyncHandler(async (req, res) => {
   const returnUrl = `${process.env.CLIENT_URL}/${req.params.slug}/pay?paymentId=${payment.id}`;
   const adapter = provider === 'telr'
     ? require('../utils/telrAdapter')
-    : require('../utils/ngeniusAdapter');
+    : provider === 'ngenius'
+    ? require('../utils/ngeniusAdapter')
+    : require('../utils/ziinaBillAdapter');
 
   const session = await adapter.createPaymentSession(integration.config, total, 'Tavzio bill payment', payment.id, returnUrl);
   if (!session.success) {
@@ -1372,7 +1379,9 @@ const confirmPaySession = asyncHandler(async (req, res) => {
 
   const adapter = payment.provider === 'telr'
     ? require('../utils/telrAdapter')
-    : require('../utils/ngeniusAdapter');
+    : payment.provider === 'ngenius'
+    ? require('../utils/ngeniusAdapter')
+    : require('../utils/ziinaBillAdapter');
 
   const check = await adapter.checkPaymentStatus(integration.config, payment.provider_ref);
   if (!check.success) {
