@@ -1,6 +1,7 @@
 const express = require('express');
 const {
   listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, listRequests, dismissRequest,
+  recordManualPayment,
 } = require('../controllers/orderController');
 const { exportOrders } = require('../controllers/exportController');
 const { protect, enforceTenant } = require('../middleware/auth');
@@ -19,5 +20,6 @@ router.get('/', listOrders);
 router.patch('/:orderId', updateOrderStatus);
 router.post('/:orderId/void', voidOrder);
 router.post('/:orderId/items/:itemId/void', voidOrderItem);
+router.post('/:orderId/manual-payment', recordManualPayment);
 
 module.exports = router;

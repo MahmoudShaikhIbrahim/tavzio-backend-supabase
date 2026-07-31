@@ -57,10 +57,10 @@ const dismissRequest = asyncHandler(async (req, res) => {
 });
 
 // @route PATCH /api/businesses/:businessId/orders/:orderId
-// Body: { status: 'pending'|'preparing'|'ready'|'completed'|'cancelled' }
+// Body: { status: 'pending'|'ready'|'completed'|'cancelled' }
 const updateOrderStatus = asyncHandler(async (req, res) => {
   const { status } = req.body;
-  const allowed = ['pending', 'preparing', 'ready', 'completed', 'cancelled'];
+  const allowed = ['pending', 'ready', 'completed', 'cancelled'];
   if (!allowed.includes(status)) {
     return res.status(400).json({ message: 'Invalid status' });
   }
@@ -259,4 +259,80 @@ const placeStaffOrder = asyncHandler(async (req, res) => {
   res.status(201).json({ order, items: orderItemRows });
 });
 
-module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, listRequests, dismissRequest };
+// @route POST /api/businesses/:businessId/orders/:orderId/manual-payment
+// Body: { itemIds: string[], method: 'card_machine' | 'cash' }
+// Records money staff collected OUTSIDE Tavzio entirely (the restaurant's
+// own card machine, or cash) - lives as an ordinary row in the same
+// `payments` table as online Pay Bill transactions, distinguished only by
+// provider ('manual_cash' / 'manual_card_machine'). This
+// is the ONLY thing that ever marks an item paid when money didn't move
+// through a Tavzio gateway - it can never be created without pointing at
+// real, currently-unpaid items already on this order, by design: there is
+// no path here that lets a payment exist disconnected from real items.
+const recordManualPayment = asyncHandler(async (req, res) => {
+  const { itemIds, method } = req.body;
+  const allowedMethods = ['card_machine', 'cash'];
+  if (!Array.isArray(itemIds) || itemIds.length === 0) {
+    return res.status(400).json({ message: 'No items selected' });
+  }
+  if (!allowedMethods.includes(method)) {
+    return res.status(400).json({ message: 'Invalid payment method' });
+  }
+
+  // Tenant-scoped lookup via req.supabase (RLS) confirms this order
+  // genuinely belongs to this business before anything is written -
+  // req.supabase, not supabaseAdmin, specifically so a staff member from
+  // a different business could never settle someone else's order.
+  const { data: order, error: orderError } = await req.supabase
+    .from('orders')
+    .select('id, card_id, order_items(*)')
+    .eq('id', req.params.orderId)
+    .eq('business_id', req.params.businessId)
+    .single();
+  if (orderError || !order) return res.status(404).json({ message: 'Order not found' });
+
+  const unpaidItems = order.order_items.filter((i) => !i.paid && !i.voided);
+  const selectedItems = unpaidItems.filter((i) => itemIds.includes(i.id));
+  if (selectedItems.length === 0) {
+    return res.status(400).json({ message: 'None of those items are unpaid on this order' });
+  }
+
+  const amount = selectedItems.reduce((sum, i) => sum + (i.unit_price + Number(i.addon_total || 0)) * i.quantity, 0);
+  const settledIds = selectedItems.map((i) => i.id);
+
+  // supabaseAdmin here deliberately - payments has no authenticated
+  // insert policy at all (every existing write path is service-role,
+  // matching the online-payment flows), so a manual settlement has to
+  // go through it too. Tenant safety already happened above via
+  // req.supabase - this write is scoped to exactly the items just
+  // verified to belong to this business's order.
+  const { error: paymentError } = await supabaseAdmin.from('payments').insert({
+    business_id: req.params.businessId,
+    card_id: order.card_id,
+    order_item_ids: settledIds,
+    amount,
+    tip_amount: 0,
+    status: 'completed',
+    provider: `manual_${method}`,
+    provider_ref: '',
+    recorded_by: req.user.id,
+  });
+  if (paymentError) return res.status(400).json({ message: paymentError.message });
+
+  await supabaseAdmin
+    .from('order_items')
+    .update({ paid: true, cash_pending: false })
+    .in('id', settledIds);
+
+  await logAction({
+    businessId: req.params.businessId,
+    actor: req.user,
+    action: 'manual_payment_recorded',
+    targetId: order.id,
+    details: { method, amount, itemCount: settledIds.length },
+  });
+
+  res.status(201).json({ amount, itemCount: settledIds.length, method });
+});
+
+module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, listRequests, dismissRequest, recordManualPayment };

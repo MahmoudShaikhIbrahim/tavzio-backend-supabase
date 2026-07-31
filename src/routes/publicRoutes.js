@@ -11,6 +11,7 @@ const {
   getPublicServices,
   submitBooking,
   getBill,
+  markItemsCashPending,
   payBill,
   createPaySession,
   confirmPaySession,
@@ -29,6 +30,7 @@ router.post('/business/:slug/orders', submitOrder);
 router.get('/business/:slug/services', getPublicServices);
 router.post('/business/:slug/bookings', submitBooking);
 router.get('/business/:slug/bill', getBill);
+router.post('/business/:slug/bill/cash-pending', markItemsCashPending);
 router.post('/business/:slug/bill/pay', payBill);
 router.post('/business/:slug/bill/pay-session', createPaySession);
 router.post('/business/:slug/bill/confirm', confirmPaySession);

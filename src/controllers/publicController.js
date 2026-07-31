@@ -908,6 +908,71 @@ const submitBooking = asyncHandler(async (req, res) => {
   res.status(201).json({ booking });
 });
 
+// @route POST /api/public/business/:slug/bill/cash-pending
+// Body: { tapEventId, itemIds }
+// Customer intent only - this NEVER marks anything paid. It flags the
+// selected items as "cash pending" so staff get alerted to come collect
+// it, while the items stay fully visible and still payable online by
+// anyone at the table in the meantime (same "whoever gets there first"
+// rule as any other split-bill item). Only an explicit staff
+// confirmation (via recordManualPayment, the same flow as any other
+// manual settlement) actually marks something paid and clears this flag.
+// This two-step design exists specifically so a customer's own tap can
+// never make money disappear from tracking without a human confirming
+// it actually arrived - see the cash-payment design discussion.
+const markItemsCashPending = asyncHandler(async (req, res) => {
+  const { tapEventId, itemIds } = req.body;
+  if (!Array.isArray(itemIds) || itemIds.length === 0) {
+    return res.status(400).json({ message: 'No items selected' });
+  }
+
+  const { data: business } = await supabaseAdmin
+    .from('businesses')
+    .select('id')
+    .eq('slug', req.params.slug)
+    .eq('status', 'active')
+    .single();
+  if (!business) return res.status(404).json({ message: 'Business not found' });
+
+  const cutoff = new Date(Date.now() - TAP_TOKEN_VALID_MINUTES * 60 * 1000).toISOString();
+  const { data: tapEvent } = await supabaseAdmin
+    .from('events')
+    .select('id, card_id')
+    .eq('id', tapEventId)
+    .eq('business_id', business.id)
+    .eq('type', 'nfc_tap')
+    .gte('created_at', cutoff)
+    .maybeSingle();
+  if (!tapEvent || !tapEvent.card_id) {
+    return res.status(400).json({ message: 'This session has expired - please tap again' });
+  }
+
+  const { data: orders } = await supabaseAdmin
+    .from('orders')
+    .select('id, order_items(id)')
+    .eq('business_id', business.id)
+    .eq('card_id', tapEvent.card_id)
+    .eq('request_type', 'order')
+    .eq('voided', false)
+    .neq('status', 'cancelled');
+
+  // Only ever flags items that genuinely belong to this table and are
+  // still actually unpaid - never trusts itemIds blindly.
+  const validItemIds = new Set((orders || []).flatMap((o) => o.order_items).map((i) => i.id));
+  const targetIds = itemIds.filter((id) => validItemIds.has(id));
+  if (targetIds.length === 0) {
+    return res.status(400).json({ message: 'None of those items belong to this table' });
+  }
+
+  await supabaseAdmin
+    .from('order_items')
+    .update({ cash_pending: true })
+    .in('id', targetIds)
+    .eq('paid', false);
+
+  res.json({ message: 'Marked as cash pending - let your server know', itemIds: targetIds });
+});
+
 // @route GET /api/public/business/:slug/bill?tapEventId=X
 // Everything still unpaid at this table, across every order placed there -
 // not just the most recent one. No auto-attribution by who ordered what;
@@ -1437,6 +1502,7 @@ module.exports = {
   submitOrder,
   getPublicServices,
   submitBooking,
+  markItemsCashPending,
   getBill,
   payBill,
   createPaySession,
