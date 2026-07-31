@@ -30,7 +30,7 @@ const EXTRACTION_SYSTEM_PROMPT = `You are reading a restaurant's menu from an up
 
 1. Extract every category, item name, and price you can read. Prices are plain numbers (e.g. 45 or 45.50) in the menu's own currency - if a currency symbol/code is visible and is NOT AED, include it in a "currency" field on that item so a human can double check; if AED or unmarked (assume AED), omit the currency field.
 2. Only include a "description" field for an item if the menu text ITSELF already contains a description for it. If an item has no description in the source, do not write one - omit the field entirely. Never invent, infer, or embellish a description.
-3. Only include a "photo" field for an item if the upload genuinely contains a real photograph of that specific dish next to or clearly associated with it. When it does, give the 0-indexed image index (matching the order images were provided to you) and a tight bounding box around JUST that dish photo as fractions of that image's width/height: {"imageIndex": 0, "x": 0.05, "y": 0.10, "width": 0.40, "height": 0.30} (x,y = top-left corner). If there is no real source photo for an item, omit the "photo" field entirely - never invent one. IMPORTANT: menu sources are often a dense grid of many items packed close together (e.g. a delivery-app menu screenshot with two columns of dish photos). Double-check each bounding box only covers that exact item's own photo, not a neighboring item's photo or the gap between them - a box that's even slightly off will crop the wrong dish entirely. When items are tightly packed, err toward a tighter/smaller box fully inside the correct photo rather than a looser one that risks bleeding into an adjacent item.
+3. Only include a "photo" field for an item if the upload genuinely contains a real photograph of that specific dish next to or clearly associated with it. When it does, give the 0-indexed image index (matching the order images were provided to you) and a bounding box matching that photo's ACTUAL visible boundaries as precisely as possible, as fractions of that image's width/height: {"imageIndex": 0, "x": 0.05, "y": 0.10, "width": 0.40, "height": 0.30} (x,y = top-left corner). Match the real edges of the photo exactly - do not deliberately shrink the box smaller than the photo actually is, and do not let it bleed into a neighboring item's photo or the gap between them. If there is no real source photo for an item, omit the "photo" field entirely - never invent one. IMPORTANT: menu sources are often a dense grid of many items packed close together (e.g. a delivery-app menu screenshot with two columns of dish photos) - look carefully at exactly where each specific photo starts and ends before giving its coordinates, since items sit close together and it's easy to misjudge the boundary.
 4. If a specific image you were given is too blurry, dark, poorly cropped, or low-resolution to read confidently, do NOT guess at its contents. Instead add an entry to "unclear": [{"imageIndex": N, "reason": "short specific reason"}], and skip extracting items from that one image only - keep extracting everything you CAN read confidently from the other images/pages.
 5. Respond with ONLY raw JSON, no markdown code fences, no commentary before or after. Exact shape:
 {
@@ -94,10 +94,33 @@ async function cropAndUploadPhoto(imageBuffers, photo, businessId) {
     const cropWidth = Math.max(1, Math.min(width - left, Math.round(photo.width * width)));
     const cropHeight = Math.max(1, Math.min(height - top, Math.round(photo.height * height)));
 
-    const cropped = await sharp(source)
-      .extract({ left, top, width: cropWidth, height: cropHeight })
-      .jpeg({ quality: 85 })
-      .toBuffer();
+    let cropPipeline = sharp(source).extract({ left, top, width: cropWidth, height: cropHeight });
+
+    // A cropped region can never contain more real detail than the
+    // source had - this doesn't manufacture pixels that don't exist.
+    // What it DOES fix: if the crop came out small (a modest-resolution
+    // source, or a small photo within a dense grid), letting the browser
+    // stretch a tiny image to fill a larger card later is what actually
+    // causes the blocky/pixelated look. Upscaling once here with a
+    // high-quality filter produces a smoother result than an ad-hoc
+    // browser stretch would, though it's still bounded by the source's
+    // real resolution - a low-res source will still look softer than a
+    // genuinely high-res photo would, just not blocky.
+    const MIN_DIMENSION = 500;
+    let lowSourceResolution = false;
+    if (cropWidth < MIN_DIMENSION && cropHeight < MIN_DIMENSION) {
+      const scale = MIN_DIMENSION / Math.max(cropWidth, cropHeight);
+      cropPipeline = cropPipeline.resize({
+        width: Math.round(cropWidth * scale),
+        height: Math.round(cropHeight * scale),
+        kernel: 'lanczos3',
+      });
+      // Flag anything upscaled more than 2x as a real quality risk worth
+      // surfacing, rather than silently passing it off as fine.
+      lowSourceResolution = scale > 2;
+    }
+
+    const cropped = await cropPipeline.jpeg({ quality: 90 }).toBuffer();
 
     const path = `${businessId}/menu-ai/${randomUUID()}.jpg`;
     const { error } = await supabaseAdmin.storage
@@ -106,7 +129,7 @@ async function cropAndUploadPhoto(imageBuffers, photo, businessId) {
     if (error) return null;
 
     const { data } = supabaseAdmin.storage.from('business-assets').getPublicUrl(path);
-    return data.publicUrl;
+    return { url: data.publicUrl, lowSourceResolution };
   } catch {
     // A bad bounding box (out of range, degenerate size) shouldn't take
     // down the whole extraction - the item just ends up with no photo,
@@ -201,8 +224,11 @@ async function extractMenuFromFiles(files, businessId) {
   for (const category of categories) {
     for (const item of category.items || []) {
       if (item.photo && typeof item.photo.imageIndex === 'number') {
-        const url = await cropAndUploadPhoto(imageBuffers, item.photo, businessId);
-        if (url) item.photoUrl = url;
+        const cropResult = await cropAndUploadPhoto(imageBuffers, item.photo, businessId);
+        if (cropResult) {
+          item.photoUrl = cropResult.url;
+          if (cropResult.lowSourceResolution) item.lowResPhoto = true;
+        }
         delete item.photo;
       }
     }
