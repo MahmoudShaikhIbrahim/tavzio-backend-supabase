@@ -30,7 +30,7 @@ const EXTRACTION_SYSTEM_PROMPT = `You are reading a restaurant's menu from an up
 
 1. Extract every category, item name, and price you can read. Prices are plain numbers (e.g. 45 or 45.50) in the menu's own currency - if a currency symbol/code is visible and is NOT AED, include it in a "currency" field on that item so a human can double check; if AED or unmarked (assume AED), omit the currency field.
 2. Only include a "description" field for an item if the menu text ITSELF already contains a description for it. If an item has no description in the source, do not write one - omit the field entirely. Never invent, infer, or embellish a description.
-3. Only include a "photo" field for an item if the upload genuinely contains a real photograph of that specific dish next to or clearly associated with it. When it does, give the 0-indexed image index (matching the order images were provided to you) and a tight bounding box around JUST that dish photo as fractions of that image's width/height: {"imageIndex": 0, "x": 0.05, "y": 0.10, "width": 0.40, "height": 0.30} (x,y = top-left corner). If there is no real source photo for an item, omit the "photo" field entirely - never invent one.
+3. Only include a "photo" field for an item if the upload genuinely contains a real photograph of that specific dish next to or clearly associated with it. When it does, give the 0-indexed image index (matching the order images were provided to you) and a tight bounding box around JUST that dish photo as fractions of that image's width/height: {"imageIndex": 0, "x": 0.05, "y": 0.10, "width": 0.40, "height": 0.30} (x,y = top-left corner). If there is no real source photo for an item, omit the "photo" field entirely - never invent one. IMPORTANT: menu sources are often a dense grid of many items packed close together (e.g. a delivery-app menu screenshot with two columns of dish photos). Double-check each bounding box only covers that exact item's own photo, not a neighboring item's photo or the gap between them - a box that's even slightly off will crop the wrong dish entirely. When items are tightly packed, err toward a tighter/smaller box fully inside the correct photo rather than a looser one that risks bleeding into an adjacent item.
 4. If a specific image you were given is too blurry, dark, poorly cropped, or low-resolution to read confidently, do NOT guess at its contents. Instead add an entry to "unclear": [{"imageIndex": N, "reason": "short specific reason"}], and skip extracting items from that one image only - keep extracting everything you CAN read confidently from the other images/pages.
 5. Respond with ONLY raw JSON, no markdown code fences, no commentary before or after. Exact shape:
 {
@@ -165,17 +165,14 @@ async function extractMenuFromFiles(files, businessId) {
   content.push({ type: 'text', text: 'Extract the full menu from the material above, following the rules exactly.' });
 
   const response = await anthropic.messages.create({
-    // Haiku 4.5 - roughly 3.75x cheaper than Sonnet, and well suited to
-    // structured extraction tasks like this one. Using the full dated
-    // snapshot id deliberately (not a bare alias) so this never silently
-    // shifts to a different model later - if Anthropic ever retires this
-    // exact snapshot, the call will fail loudly with an error rather
-    // than quietly changing behavior, and the fix is a one-line update
-    // here. The mandatory review screen (nothing publishes automatically)
-    // is what actually makes a cheaper model safe to use here - a wrong
-    // price or an odd photo crop gets caught by the owner, not shipped
-    // straight to customers.
-    model: 'claude-haiku-4-5-20251001',
+    // Switched back from Haiku 4.5 after real-world testing showed its
+    // bounding-box precision on dense multi-item menu screenshots (many
+    // dish photos packed into one grid image) wasn't reliable enough -
+    // text extraction was fine, but photo crops landed on the wrong
+    // item or the wrong region. Sonnet 5 (current model, not the older
+    // 4.6 snapshot this started on) is worth the extra cost specifically
+    // for the spatial/bounding-box part of this task.
+    model: 'claude-sonnet-5',
     max_tokens: 8000,
     system: EXTRACTION_SYSTEM_PROMPT,
     messages: [{ role: 'user', content }],
