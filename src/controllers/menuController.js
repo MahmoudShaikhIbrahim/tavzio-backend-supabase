@@ -77,7 +77,7 @@ const listItems = asyncHandler(async (req, res) => {
 
 // @route POST /api/businesses/:businessId/menu/items
 const createItem = asyncHandler(async (req, res) => {
-  const { categoryId, name, description, price, imageUrl, sortOrder = 0 } = req.body;
+  const { categoryId, name, description, price, imageUrl, sortOrder = 0, offerPrice, offerStartsAt, offerEndsAt } = req.body;
   const [nameI18n, descriptionI18n] = await Promise.all([
     translateToAllLanguages(name).catch(() => ({})),
     translateToAllLanguages(description).catch(() => ({})),
@@ -94,6 +94,9 @@ const createItem = asyncHandler(async (req, res) => {
       price: price || 0,
       image_url: imageUrl || '',
       sort_order: sortOrder,
+      offer_price: offerPrice ?? null,
+      offer_starts_at: offerStartsAt || null,
+      offer_ends_at: offerEndsAt || null,
     })
     .select()
     .single();
@@ -104,7 +107,7 @@ const createItem = asyncHandler(async (req, res) => {
 
 // @route PATCH /api/businesses/:businessId/menu/items/:itemId
 const updateItem = asyncHandler(async (req, res) => {
-  const { categoryId, name, description, price, imageUrl, isAvailable, sortOrder } = req.body;
+  const { categoryId, name, description, price, imageUrl, isAvailable, sortOrder, offerPrice, offerStartsAt, offerEndsAt } = req.body;
   const update = {};
   if (categoryId !== undefined) update.category_id = categoryId;
   if (name !== undefined) {
@@ -119,6 +122,9 @@ const updateItem = asyncHandler(async (req, res) => {
   if (imageUrl !== undefined) update.image_url = imageUrl;
   if (isAvailable !== undefined) update.is_available = isAvailable;
   if (sortOrder !== undefined) update.sort_order = sortOrder;
+  if (offerPrice !== undefined) update.offer_price = offerPrice;
+  if (offerStartsAt !== undefined) update.offer_starts_at = offerStartsAt || null;
+  if (offerEndsAt !== undefined) update.offer_ends_at = offerEndsAt || null;
 
   const { data, error } = await req.supabase
     .from('menu_items')

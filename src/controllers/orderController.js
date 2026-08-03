@@ -335,4 +335,28 @@ const recordManualPayment = asyncHandler(async (req, res) => {
   res.status(201).json({ amount, itemCount: settledIds.length, method });
 });
 
-module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, listRequests, dismissRequest, recordManualPayment };
+// @route GET /api/businesses/:businessId/orders/cash-pending
+// Every item across every table currently flagged cash-pending by a
+// customer, not yet confirmed received by staff. Lives right alongside
+// Call Waiter/Request Bill on the Requests page - this is the same kind
+// of thing ("someone needs a staff member's attention at a table"),
+// customers just don't have a dedicated view for it the way this page
+// gives Call Waiter its own feed.
+const listCashPendingItems = asyncHandler(async (req, res) => {
+  const { data: orders, error } = await req.supabase
+    .from('orders')
+    .select('id, table_label, order_items(*)')
+    .eq('business_id', req.params.businessId)
+    .eq('request_type', 'order')
+    .eq('voided', false);
+  if (error) return res.status(400).json({ message: error.message });
+
+  const items = (orders || []).flatMap((o) =>
+    o.order_items
+      .filter((i) => i.cash_pending && !i.paid && !i.voided)
+      .map((i) => ({ ...i, order_id: o.id, table_label: o.table_label }))
+  );
+  res.json(items);
+});
+
+module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, listRequests, dismissRequest, recordManualPayment, listCashPendingItems };

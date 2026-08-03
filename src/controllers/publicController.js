@@ -594,6 +594,12 @@ const getPublicMenu = asyncHandler(async (req, res) => {
       return acc;
     }, {});
   }
+  const now = new Date();
+  const activeOfferItems = (items || []).filter(
+    (i) => i.offer_price != null && i.offer_starts_at && i.offer_ends_at
+      && new Date(i.offer_starts_at) <= now && now <= new Date(i.offer_ends_at)
+  );
+
   const itemsWithAddons = (items || []).map((i) => ({
     ...i,
     name: resolveText(i.name, i.name_i18n, lang),
@@ -605,11 +611,26 @@ const getPublicMenu = asyncHandler(async (req, res) => {
     name: resolveText(c.name, c.name_i18n, lang),
   }));
 
+  // Prepended so it's always the first thing a customer sees - a virtual
+  // category with a fixed id that never collides with a real one, built
+  // fresh on every request from whatever's currently active. No item
+  // "belongs" here in the database; it's just a filtered, re-priced view
+  // of items that live in their real categories the whole time.
+  if (activeOfferItems.length > 0) {
+    translatedCategories.unshift({ id: '__special_offers__', business_id: business.id, name: 'Special Offers', sort_order: -1, paused: false });
+  }
+  const itemsForResponse = itemsWithAddons.map((i) => {
+    const onOffer = activeOfferItems.some((o) => o.id === i.id);
+    return onOffer
+      ? [{ ...i, category_id: '__special_offers__', original_price: i.price, price: i.offer_price }, i]
+      : [i];
+  }).flat();
+
   // Tells the frontend whether this is a read-only menu (menuView on,
   // submission off - browse only, no cart) or the full cart flow.
   res.json({
     categories: translatedCategories,
-    items: itemsWithAddons,
+    items: itemsForResponse,
     orderingPaused: !!business.ordering_paused,
     submissionEnabled: !!business.features?.ordering?.submission,
     callWaiterEnabled: !!business.features?.ordering?.callWaiter,
