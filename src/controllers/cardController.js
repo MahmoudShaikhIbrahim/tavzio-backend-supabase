@@ -1,6 +1,5 @@
 const asyncHandler = require('../utils/asyncHandler');
 const { revokeSessionsFor } = require('../utils/revokeSessions');
-const { logAction } = require('../utils/auditLog');
 
 // @route POST /api/businesses/:businessId/cards
 const createCards = asyncHandler(async (req, res) => {
@@ -70,14 +69,6 @@ const deleteCard = asyncHandler(async (req, res) => {
 
   if (error) return res.status(400).json({ message: error.message });
   if (!count) return res.status(404).json({ message: 'Card not found' });
-
-  await logAction({
-    businessId: req.params.businessId,
-    actor: req.user,
-    action: 'card_deleted',
-    targetId: req.params.cardId,
-    details: { label: card?.label || '', uid: card?.uid || '' },
-  });
 
   res.json({ message: 'Card deleted' });
 });

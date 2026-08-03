@@ -27,51 +27,14 @@ const refundPayment = asyncHandler(async (req, res) => {
 
   const paymentProvider = payment.provider || 'tap';
 
-  // Manual payments (cash / card machine) never moved through a gateway
-  // in the first place - there is no external transaction to reverse,
-  // and no pos_integrations lookup makes sense here. This is purely a
-  // local correction: un-mark the items as paid so they're owed again,
-  // and record that it was undone. Any actual cash/card reversal happens
-  // physically, at the till, same as it always would without this
-  // system - Tavzio was never holding that money.
+  // Manual payments (cash / card machine) can't be refunded here at
+  // all - there's no gateway transaction to reverse, and no UI path to
+  // this anymore either. Blocked explicitly rather than left to fall
+  // through to the gateway logic below, which would incorrectly try to
+  // call a real payment provider's API for a transaction that never
+  // went through one.
   if (paymentProvider.startsWith('manual_')) {
-    if (refundAmount !== fullAmount) {
-      return res.status(400).json({ message: 'Manual payments can only be fully undone, not partially - record a new payment for the corrected amount instead' });
-    }
-    const { data: updated, error } = await req.supabase
-      .from('payments')
-      .update({ refunded: true, refund_amount: refundAmount, refunded_at: new Date().toISOString(), refunded_by: req.user.id })
-      .eq('id', payment.id)
-      .select()
-      .single();
-    if (error) return res.status(400).json({ message: error.message });
-
-    if (Array.isArray(payment.order_item_ids) && payment.order_item_ids.length > 0) {
-      await supabaseAdmin.from('order_items').update({ paid: false }).in('id', payment.order_item_ids);
-
-      // If the table had already auto-closed (this was the last thing
-      // owed, and it's now un-done), the order those items belong to
-      // would otherwise stay voided - hiding a genuinely unpaid item
-      // instead of making it payable again.
-      const { data: affectedItems } = await supabaseAdmin
-        .from('order_items')
-        .select('order_id')
-        .in('id', payment.order_item_ids);
-      const orderIds = [...new Set((affectedItems || []).map((i) => i.order_id))];
-      if (orderIds.length > 0) {
-        await supabaseAdmin.from('orders').update({ voided: false }).in('id', orderIds).eq('void_reason', 'Fully paid - auto-closed');
-      }
-    }
-
-    await logAction({
-      businessId: req.params.businessId,
-      actor: req.user,
-      action: 'manual_payment_undone',
-      targetId: payment.id,
-      details: { amount: refundAmount, method: paymentProvider },
-    });
-
-    return res.json(updated);
+    return res.status(400).json({ message: 'Manual payments cannot be refunded from here' });
   }
 
   // Deliberately supabaseAdmin, not req.supabase: pos_integrations for

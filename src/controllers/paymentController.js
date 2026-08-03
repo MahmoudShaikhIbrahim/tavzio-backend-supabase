@@ -1,5 +1,6 @@
 const { supabaseAdmin } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
+const { logAction } = require('../utils/auditLog');
 
 // @route GET /api/businesses/:businessId/payment-integration
 // business_owner only - full config including the Tap secret key.
@@ -39,6 +40,17 @@ const upsertPaymentIntegration = asyncHandler(async (req, res) => {
     .single();
 
   if (error) return res.status(400).json({ message: error.message });
+
+  await logAction({
+    businessId: req.params.businessId,
+    actor: req.user,
+    action: 'payment_integration_updated',
+    targetId: data.id,
+    // Deliberately never the actual secret key - just what changed
+    // about the setting itself.
+    details: { provider: data.provider, enabled: data.enabled },
+  });
+
   res.json(data);
 });
 

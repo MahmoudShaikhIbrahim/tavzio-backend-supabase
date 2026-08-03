@@ -249,14 +249,6 @@ const placeStaffOrder = asyncHandler(async (req, res) => {
     .insert(orderItemRows.map((i) => ({ ...i, order_id: order.id })));
   if (itemsError) return res.status(400).json({ message: itemsError.message });
 
-  await logAction({
-    businessId: req.params.businessId,
-    actor: req.user,
-    action: 'staff_order_placed',
-    targetId: order.id,
-    details: { table: card.label, itemCount: orderItemRows.length, total },
-  });
-
   res.status(201).json({ order, items: orderItemRows });
 });
 
