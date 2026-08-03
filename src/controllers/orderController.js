@@ -1,6 +1,7 @@
 const { supabaseAdmin } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 const { logAction } = require('../utils/auditLog');
+const { maybeAutoCloseTable } = require('../utils/tableAutoClose');
 
 // @route GET /api/businesses/:businessId/orders?status=
 // Only real food orders - call_waiter/request_bill quick requests are
@@ -323,6 +324,8 @@ const recordManualPayment = asyncHandler(async (req, res) => {
     .from('order_items')
     .update({ paid: true, cash_pending: false })
     .in('id', settledIds);
+
+  await maybeAutoCloseTable(supabaseAdmin, req.params.businessId, order.card_id);
 
   await logAction({
     businessId: req.params.businessId,

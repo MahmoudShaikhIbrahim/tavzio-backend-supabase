@@ -2,6 +2,7 @@ const { supabaseAdmin, supabasePublic } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 const { notifyCardUsed, sendDeviceConfirmation } = require('../utils/notifications');
 const { resolveText } = require('../utils/translate');
+const { maybeAutoCloseTable } = require('../utils/tableAutoClose');
 
 function detectDevice(userAgent = '') {
   const ua = userAgent.toLowerCase();
@@ -1207,8 +1208,14 @@ async function computeBillContext(slug, tapEventId, itemIds, tipAmount, phone) {
 async function finalizePaidBill({ business, payment, selectedItems, appliedClaim, discountAmount, discountedAmount, amount, tipAmount, phone, total }) {
   await supabaseAdmin
     .from('order_items')
-    .update({ paid: true })
+    .update({ paid: true, cash_pending: false })
     .in('id', selectedItems.map((i) => i.id));
+
+  // The moment this specific payment might have been the last thing
+  // owed on the table - checked fresh against the database rather than
+  // assumed, since split-bill means other people could still owe money
+  // even after this particular payment succeeds.
+  await maybeAutoCloseTable(supabaseAdmin, business.id, payment.card_id);
 
   // A threshold reward only actually resets once it's genuinely used -
   // tapping "Claim" never touched the membership, this is the real
