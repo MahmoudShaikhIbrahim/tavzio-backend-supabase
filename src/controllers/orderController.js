@@ -66,9 +66,33 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Invalid status' });
   }
 
+  const update = { status };
+  // Fires the "Table X's order is ready" notification on the Orders page
+  // - reset every time an order goes ready, including a second time if
+  // it somehow moves back to pending and ready again.
+  if (status === 'ready') update.ready_ack = false;
+
   const { data, error } = await req.supabase
     .from('orders')
-    .update({ status })
+    .update(update)
+    .eq('id', req.params.orderId)
+    .eq('business_id', req.params.businessId)
+    .select()
+    .single();
+
+  if (error || !data) return res.status(404).json({ message: 'Order not found' });
+  res.json(data);
+});
+
+// @route POST /api/businesses/:businessId/orders/:orderId/ready-ack
+// Marks the "this order is ready" notification as seen on the Orders
+// page - deliberately does NOT touch the order's own status. Same
+// principle as dismissing any other request: acknowledging it is a
+// separate fact from resolving it.
+const ackOrderReady = asyncHandler(async (req, res) => {
+  const { data, error } = await req.supabase
+    .from('orders')
+    .update({ ready_ack: true })
     .eq('id', req.params.orderId)
     .eq('business_id', req.params.businessId)
     .select()
@@ -354,4 +378,4 @@ const listCashPendingItems = asyncHandler(async (req, res) => {
   res.json(items);
 });
 
-module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, listRequests, dismissRequest, recordManualPayment, listCashPendingItems };
+module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, listRequests, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady };

@@ -770,65 +770,27 @@ const submitOrder = asyncHandler(async (req, res) => {
     integration = data;
   }
 
-  // Consolidate quick successive orders from the same table into one
-  // order card instead of staff having to track 10 separate ones for a
-  // single sitting - but only while it's still genuinely the "same
-  // round": not completed yet, not voided, and within a reasonable time
-  // window. A gap longer than this, or an order staff already marked
-  // completed, starts a fresh order instead - that's a deliberately
-  // new round of ordering, not a continuation.
-  const ORDER_MERGE_WINDOW_MINUTES = 10;
-  let order = null;
-  let isNewOrder = true;
-
-  if (requestType === 'order' && tapEvent.card_id) {
-    const mergeCutoff = new Date(Date.now() - ORDER_MERGE_WINDOW_MINUTES * 60 * 1000).toISOString();
-    const { data: recentOrder } = await supabaseAdmin
-      .from('orders')
-      .select('id, total, note')
-      .eq('business_id', business.id)
-      .eq('card_id', tapEvent.card_id)
-      .eq('request_type', 'order')
-      .eq('voided', false)
-      .in('status', ['pending', 'ready'])
-      .gte('created_at', mergeCutoff)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (recentOrder) {
-      const updatePayload = { total: Number(recentOrder.total) + total };
-      if (note) updatePayload.note = recentOrder.note ? `${recentOrder.note}; ${note}` : note;
-      const { data: updatedOrder, error: updateError } = await supabaseAdmin
-        .from('orders')
-        .update(updatePayload)
-        .eq('id', recentOrder.id)
-        .select()
-        .single();
-      if (updateError) return res.status(400).json({ message: updateError.message });
-      order = updatedOrder;
-      isNewOrder = false;
-    }
-  }
-
-  if (!order) {
-    const { data: newOrder, error: orderError } = await supabaseAdmin
-      .from('orders')
-      .insert({
-        business_id: business.id,
-        card_id: tapEvent.card_id,
-        table_label: tableLabel,
-        note: note || '',
-        total,
-        request_type: requestType,
-        source_event_id: tapEventId,
-        pos_sync_status: integration ? 'pending' : 'not_applicable',
-      })
-      .select()
-      .single();
-    if (orderError) return res.status(400).json({ message: orderError.message });
-    order = newOrder;
-  }
+  // Every submission is always its own separate order - deliberately, per
+  // explicit decision: Kitchen needs each order genuinely distinct with
+  // nothing merged, so staff can tell exactly what's new versus already
+  // being worked. The Orders page groups a table's orders visually for
+  // organization, but that's a display concern only - nothing here ever
+  // combines two orders into one database record.
+  const { data: order, error: orderError } = await supabaseAdmin
+    .from('orders')
+    .insert({
+      business_id: business.id,
+      card_id: tapEvent.card_id,
+      table_label: tableLabel,
+      note: note || '',
+      total,
+      request_type: requestType,
+      source_event_id: tapEventId,
+      pos_sync_status: integration ? 'pending' : 'not_applicable',
+    })
+    .select()
+    .single();
+  if (orderError) return res.status(400).json({ message: orderError.message });
 
   if (orderItemRows.length > 0) {
     const { error: itemsError } = await supabaseAdmin
@@ -855,7 +817,7 @@ const submitOrder = asyncHandler(async (req, res) => {
       .catch(() => {}); // fire-and-forget - order already exists regardless
   }
 
-  res.status(201).json({ order, items: orderItemRows, merged: !isNewOrder });
+  res.status(201).json({ order, items: orderItemRows });
 });
 
 // @route GET /api/public/business/:slug/services
