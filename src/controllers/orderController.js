@@ -338,7 +338,7 @@ const recordManualPayment = asyncHandler(async (req, res) => {
 
   await supabaseAdmin
     .from('order_items')
-    .update({ paid: true, cash_pending: false })
+    .update({ paid: true, cash_pending: false, paid_at: new Date().toISOString() })
     .in('id', settledIds);
 
   await maybeAutoCloseTable(supabaseAdmin, req.params.businessId, order.card_id);

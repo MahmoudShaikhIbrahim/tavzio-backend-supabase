@@ -1048,8 +1048,12 @@ const getBill = asyncHandler(async (req, res) => {
   const items = allItems.filter((i) => !i.paid);
   // Shown in a collapsed "Paid" section on the bill page - lets any
   // diner (including whoever just paid) see what's already settled at a
-  // glance without it cluttering the main payable list.
-  const paidItems = allItems.filter((i) => i.paid);
+  // glance without it cluttering the main payable list. Expires 10
+  // minutes after payment regardless of what else happens at the table -
+  // doesn't depend on auto-close's one "everything paid at once" moment,
+  // which isn't guaranteed to ever occur if new items keep getting added.
+  const PAID_SECTION_WINDOW_MS = 10 * 60 * 1000;
+  const paidItems = allItems.filter((i) => i.paid && i.paid_at && Date.now() - new Date(i.paid_at).getTime() < PAID_SECTION_WINDOW_MS);
 
   const subtotal = items.reduce((sum, i) => sum + (i.unit_price + Number(i.addon_total || 0)) * i.quantity, 0);
 
@@ -1214,7 +1218,7 @@ async function computeBillContext(slug, tapEventId, itemIds, tipAmount, phone) {
 async function finalizePaidBill({ business, payment, selectedItems, appliedClaim, discountAmount, discountedAmount, amount, tipAmount, phone, total }) {
   await supabaseAdmin
     .from('order_items')
-    .update({ paid: true, cash_pending: false })
+    .update({ paid: true, cash_pending: false, paid_at: new Date().toISOString() })
     .in('id', selectedItems.map((i) => i.id));
 
   // The moment this specific payment might have been the last thing
