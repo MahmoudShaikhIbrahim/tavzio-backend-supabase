@@ -31,25 +31,24 @@ const extractMenu = asyncHandler(async (req, res) => {
     'X-Accel-Buffering': 'no', // disables nginx-style response buffering some proxies apply, so pings actually reach the client as they're written rather than getting queued
   });
 
-  // Throttled rather than firing on every single stream event (which can
-  // be many per second) - the goal is "never let the connection sit
-  // idle long enough to time out," not "relay every token." A ping
-  // every couple of seconds is more than enough for that.
-  let lastPing = 0;
-  function onActivity() {
-    const now = Date.now();
-    if (now - lastPing > 2000) {
-      lastPing = now;
-      res.write(JSON.stringify({ type: 'ping' }) + '\n');
-    }
-  }
+  // A real, independent timer - not reactive to Claude's own stream
+  // activity. The previous version only pinged in response to a stream
+  // event, which meant a long, silent stretch of adaptive thinking (no
+  // events at all) produced zero pings and let the connection go idle
+  // anyway - exactly what happened on a large, complex menu. This fires
+  // on its own clock no matter what Claude is doing underneath, so the
+  // connection can never go quiet long enough to time out.
+  const pingInterval = setInterval(() => {
+    res.write(JSON.stringify({ type: 'ping' }) + '\n');
+  }, 2000);
 
   try {
-    const result = await extractMenuFromFiles(files, req.params.businessId, onActivity);
+    const result = await extractMenuFromFiles(files, req.params.businessId);
     res.write(JSON.stringify({ type: 'result', data: result }) + '\n');
   } catch (err) {
     res.write(JSON.stringify({ type: 'error', message: err.message || 'Could not read the menu from these files' }) + '\n');
   } finally {
+    clearInterval(pingInterval);
     res.end();
   }
 });

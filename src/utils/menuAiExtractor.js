@@ -140,12 +140,8 @@ async function cropAndUploadPhoto(imageBuffers, photo, businessId) {
 }
 
 // `files` is an array of multer file objects: { originalname, mimetype, buffer }.
-// `onActivity`, if provided, fires on every raw stream event from Claude -
-// both during adaptive thinking and while writing the response text. This
-// is what the caller uses to keep the HTTP connection alive for as long
-// as genuine work is happening, on a document that can take a while.
 // Returns { categories, unclear, warnings } - never touches the database.
-async function extractMenuFromFiles(files, businessId, onActivity) {
+async function extractMenuFromFiles(files, businessId) {
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new Error('ANTHROPIC_API_KEY is not configured');
   }
@@ -212,16 +208,6 @@ async function extractMenuFromFiles(files, businessId, onActivity) {
     system: EXTRACTION_SYSTEM_PROMPT,
     messages: [{ role: 'user', content }],
   });
-
-  // Fires on every raw SSE event - thinking deltas, text deltas, and the
-  // API's own periodic pings alike. Using the broadest event rather than
-  // just 'text' deliberately: a large menu can spend a long stretch in
-  // adaptive thinking before writing any response text at all, and that
-  // phase needs to keep the connection alive just as much as the part
-  // that's actually streaming the JSON back.
-  if (onActivity) {
-    stream.on('streamEvent', () => onActivity());
-  }
 
   const response = await stream.finalMessage();
 
