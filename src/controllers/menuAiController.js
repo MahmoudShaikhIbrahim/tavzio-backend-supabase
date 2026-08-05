@@ -4,11 +4,16 @@ const { extractMenuFromFiles } = require('../utils/menuAiExtractor');
 
 // @route POST /api/businesses/:businessId/menu/ai/extract
 // multipart/form-data, field name "files" - one PDF, one Excel/CSV, or
-// multiple photos. Returns a DRAFT only: categories/items/prices/
-// descriptions/photos the AI could confidently read, plus which specific
-// uploaded images (by index) were too unclear to read at all. Nothing is
-// written to the menu here - this is reviewed and edited by a human
-// before anything goes live, via the separate /publish endpoint below.
+// multiple photos. Streams newline-delimited JSON back instead of a
+// single response: periodic {"type":"ping"} lines while Claude is still
+// working (this is what keeps the connection alive through a long
+// extraction on a big menu - both the browser's own timeout and
+// Railway's proxy timeout are about IDLE time, not total time, so
+// active writes prevent either from killing the request), then one
+// final {"type":"result","data":{...}} or {"type":"error","message":...}
+// line before the response ends. Nothing is written to the menu here -
+// this is reviewed and edited by a human before anything goes live, via
+// the separate /publish endpoint below.
 const extractMenu = asyncHandler(async (req, res) => {
   const files = req.files || [];
   if (files.length === 0) {
@@ -20,11 +25,32 @@ const extractMenu = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Too many files - please upload up to 25 at a time' });
   }
 
+  res.writeHead(200, {
+    'Content-Type': 'application/x-ndjson',
+    'Cache-Control': 'no-cache',
+    'X-Accel-Buffering': 'no', // disables nginx-style response buffering some proxies apply, so pings actually reach the client as they're written rather than getting queued
+  });
+
+  // Throttled rather than firing on every single stream event (which can
+  // be many per second) - the goal is "never let the connection sit
+  // idle long enough to time out," not "relay every token." A ping
+  // every couple of seconds is more than enough for that.
+  let lastPing = 0;
+  function onActivity() {
+    const now = Date.now();
+    if (now - lastPing > 2000) {
+      lastPing = now;
+      res.write(JSON.stringify({ type: 'ping' }) + '\n');
+    }
+  }
+
   try {
-    const result = await extractMenuFromFiles(files, req.params.businessId);
-    res.json(result);
+    const result = await extractMenuFromFiles(files, req.params.businessId, onActivity);
+    res.write(JSON.stringify({ type: 'result', data: result }) + '\n');
   } catch (err) {
-    res.status(422).json({ message: err.message || 'Could not read the menu from these files' });
+    res.write(JSON.stringify({ type: 'error', message: err.message || 'Could not read the menu from these files' }) + '\n');
+  } finally {
+    res.end();
   }
 });
 

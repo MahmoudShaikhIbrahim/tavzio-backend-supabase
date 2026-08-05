@@ -29,10 +29,11 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const EXTRACTION_SYSTEM_PROMPT = `You are reading a restaurant's menu from an upload (PDF pages, photos of a printed menu, or a spreadsheet dump) and structuring it for a menu-management system. Follow these rules exactly:
 
 1. Extract every category, item name, and price you can read. Prices are plain numbers (e.g. 45 or 45.50) in the menu's own currency - if a currency symbol/code is visible and is NOT AED, include it in a "currency" field on that item so a human can double check; if AED or unmarked (assume AED), omit the currency field.
-2. Only include a "description" field for an item if the menu text ITSELF already contains a description for it. If an item has no description in the source, do not write one - omit the field entirely. Never invent, infer, or embellish a description.
-3. Only include a "photo" field for an item if the upload genuinely contains a real photograph of that specific dish next to or clearly associated with it. When it does, give the 0-indexed image index (matching the order images were provided to you) and a bounding box matching that photo's ACTUAL visible boundaries as precisely as possible, as fractions of that image's width/height: {"imageIndex": 0, "x": 0.05, "y": 0.10, "width": 0.40, "height": 0.30} (x,y = top-left corner). Match the real edges of the photo exactly - do not deliberately shrink the box smaller than the photo actually is, and do not let it bleed into a neighboring item's photo or the gap between them. If there is no real source photo for an item, omit the "photo" field entirely - never invent one. IMPORTANT: menu sources are often a dense grid of many items packed close together (e.g. a delivery-app menu screenshot with two columns of dish photos) - look carefully at exactly where each specific photo starts and ends before giving its coordinates, since items sit close together and it's easy to misjudge the boundary.
-4. If a specific image you were given is too blurry, dark, poorly cropped, or low-resolution to read confidently, do NOT guess at its contents. Instead add an entry to "unclear": [{"imageIndex": N, "reason": "short specific reason"}], and skip extracting items from that one image only - keep extracting everything you CAN read confidently from the other images/pages.
-5. Respond with ONLY raw JSON, no markdown code fences, no commentary before or after. Exact shape:
+2. If the source menu shows item names and/or descriptions in more than one language (e.g. English alongside Arabic, printed side by side or mirrored), extract ONLY the English version as the "name"/"description" - never both, never a combined bilingual string. The platform already auto-translates every item into multiple languages on its own once saved, so a second language captured here would just be redundant text with no use, and doubles the work for no benefit. If a menu has NO English at all for a given item, transliterate/translate it yourself into a reasonable English name rather than leaving it untouched in the original script.
+3. Only include a "description" field for an item if the menu text ITSELF already contains a description for it. If an item has no description in the source, do not write one - omit the field entirely. Never invent, infer, or embellish a description.
+4. Only include a "photo" field for an item if the upload genuinely contains a real photograph of that specific dish next to or clearly associated with it. When it does, give the 0-indexed image index (matching the order images were provided to you) and a bounding box matching that photo's ACTUAL visible boundaries as precisely as possible, as fractions of that image's width/height: {"imageIndex": 0, "x": 0.05, "y": 0.10, "width": 0.40, "height": 0.30} (x,y = top-left corner). Match the real edges of the photo exactly - do not deliberately shrink the box smaller than the photo actually is, and do not let it bleed into a neighboring item's photo or the gap between them. If there is no real source photo for an item, omit the "photo" field entirely - never invent one. IMPORTANT: menu sources are often a dense grid of many items packed close together (e.g. a delivery-app menu screenshot with two columns of dish photos) - look carefully at exactly where each specific photo starts and ends before giving its coordinates, since items sit close together and it's easy to misjudge the boundary.
+5. If a specific image you were given is too blurry, dark, poorly cropped, or low-resolution to read confidently, do NOT guess at its contents. Instead add an entry to "unclear": [{"imageIndex": N, "reason": "short specific reason"}], and skip extracting items from that one image only - keep extracting everything you CAN read confidently from the other images/pages.
+6. Respond with ONLY raw JSON, no markdown code fences, no commentary before or after. Exact shape:
 {
   "categories": [
     {
@@ -139,8 +140,12 @@ async function cropAndUploadPhoto(imageBuffers, photo, businessId) {
 }
 
 // `files` is an array of multer file objects: { originalname, mimetype, buffer }.
+// `onActivity`, if provided, fires on every raw stream event from Claude -
+// both during adaptive thinking and while writing the response text. This
+// is what the caller uses to keep the HTTP connection alive for as long
+// as genuine work is happening, on a document that can take a while.
 // Returns { categories, unclear, warnings } - never touches the database.
-async function extractMenuFromFiles(files, businessId) {
+async function extractMenuFromFiles(files, businessId, onActivity) {
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new Error('ANTHROPIC_API_KEY is not configured');
   }
@@ -187,7 +192,7 @@ async function extractMenuFromFiles(files, businessId) {
 
   content.push({ type: 'text', text: 'Extract the full menu from the material above, following the rules exactly.' });
 
-  const response = await anthropic.messages.create({
+  const stream = anthropic.messages.stream({
     // Switched back from Haiku 4.5 after real-world testing showed its
     // bounding-box precision on dense multi-item menu screenshots (many
     // dish photos packed into one grid image) wasn't reliable enough -
@@ -196,13 +201,38 @@ async function extractMenuFromFiles(files, businessId) {
     // 4.6 snapshot this started on) is worth the extra cost specifically
     // for the spatial/bounding-box part of this task.
     model: 'claude-sonnet-5',
-    max_tokens: 8000,
+    // Sonnet 5 runs with adaptive thinking by default, and max_tokens is
+    // a hard ceiling on thinking + response text combined - this used to
+    // be sized for a model that didn't think unless asked. A large, real
+    // menu (100+ items, multiple categories, bilingual) can burn through
+    // a small budget on thinking alone before any actual JSON gets
+    // written, leaving no text content in the response at all. Sized
+    // generously here so even a genuinely large menu has room for both.
+    max_tokens: 32000,
     system: EXTRACTION_SYSTEM_PROMPT,
     messages: [{ role: 'user', content }],
   });
 
+  // Fires on every raw SSE event - thinking deltas, text deltas, and the
+  // API's own periodic pings alike. Using the broadest event rather than
+  // just 'text' deliberately: a large menu can spend a long stretch in
+  // adaptive thinking before writing any response text at all, and that
+  // phase needs to keep the connection alive just as much as the part
+  // that's actually streaming the JSON back.
+  if (onActivity) {
+    stream.on('streamEvent', () => onActivity());
+  }
+
+  const response = await stream.finalMessage();
+
   const textBlock = response.content.find((b) => b.type === 'text');
-  if (!textBlock) throw new Error('The AI did not return a readable response');
+  if (!textBlock) {
+    // Most likely cause: max_tokens was hit before any response text
+    // got written (adaptive thinking consumed the whole budget on a
+    // very large/complex menu). Surfacing stop_reason makes that
+    // diagnosable instead of a mystery next time.
+    throw new Error(`The AI did not return a readable response (stop_reason: ${response.stop_reason || 'unknown'}) - try again, or split a very large menu into smaller uploads`);
+  }
 
   let parsed;
   try {
