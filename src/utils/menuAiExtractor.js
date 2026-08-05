@@ -199,12 +199,14 @@ async function extractMenuFromFiles(files, businessId) {
     model: 'claude-sonnet-5',
     // Sonnet 5 runs with adaptive thinking by default, and max_tokens is
     // a hard ceiling on thinking + response text combined - this used to
-    // be sized for a model that didn't think unless asked. A large, real
-    // menu (100+ items, multiple categories, bilingual) can burn through
-    // a small budget on thinking alone before any actual JSON gets
-    // written, leaving no text content in the response at all. Sized
-    // generously here so even a genuinely large menu has room for both.
-    max_tokens: 32000,
+    // be sized for a model that didn't think unless asked, then later
+    // sized too conservatively even after accounting for that. Sonnet
+    // 5's real ceiling is 128,000 - sizing well below that, not right at
+    // it, still leaves generous room for both a very large menu's JSON
+    // and a real thinking budget. No cost or rate-limit downside to
+    // setting this higher: billing is based on tokens actually used, not
+    // this ceiling, so there's no reason to size it tight.
+    max_tokens: 100000,
     system: EXTRACTION_SYSTEM_PROMPT,
     messages: [{ role: 'user', content }],
   });
@@ -228,7 +230,12 @@ async function extractMenuFromFiles(files, businessId) {
     const cleaned = textBlock.text.trim().replace(/^```json\s*/i, '').replace(/```\s*$/i, '');
     parsed = JSON.parse(cleaned);
   } catch {
-    throw new Error('The AI response could not be parsed - please try again');
+    // stop_reason here is the key diagnostic: 'max_tokens' means the
+    // response was genuinely cut off mid-JSON (the menu needs an even
+    // higher ceiling, or splitting into smaller uploads) - anything else
+    // means the model actually finished but produced malformed JSON,
+    // which is a different problem and a retry is more likely to help.
+    throw new Error(`The AI response could not be parsed (stop_reason: ${response.stop_reason || 'unknown'}) - please try again`);
   }
 
   const categories = Array.isArray(parsed.categories) ? parsed.categories : [];
