@@ -119,14 +119,6 @@ const voidOrder = asyncHandler(async (req, res) => {
 
   await req.supabase.from('order_items').update({ voided: true }).eq('order_id', order.id);
 
-  await logAction({
-    businessId: req.params.businessId,
-    actor: req.user,
-    action: 'void_order',
-    targetId: order.id,
-    details: { table: order.table_label, reason: reason || '' },
-  });
-
   res.json(order);
 });
 
@@ -143,14 +135,6 @@ const voidOrderItem = asyncHandler(async (req, res) => {
     .select()
     .single();
   if (error || !item) return res.status(404).json({ message: 'Item not found' });
-
-  await logAction({
-    businessId: req.params.businessId,
-    actor: req.user,
-    action: 'void_item',
-    targetId: item.id,
-    details: { itemName: item.item_name, orderId: req.params.orderId },
-  });
 
   res.json(item);
 });
@@ -191,14 +175,6 @@ const clearTable = asyncHandler(async (req, res) => {
       .update({ voided: true, voided_by: req.user.id, voided_at: new Date().toISOString(), void_reason: 'Table cleared' })
       .in('id', affectedOrderIds);
   }
-
-  await logAction({
-    businessId: req.params.businessId,
-    actor: req.user,
-    action: 'void_order',
-    targetId: cardId,
-    details: { clearedTable: true, orderIds: affectedOrderIds },
-  });
 
   res.json({ message: 'Table cleared', clearedOrderIds: affectedOrderIds });
 });
