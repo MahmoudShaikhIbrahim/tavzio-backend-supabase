@@ -26,6 +26,8 @@ const customButtonRoutes = require('./customButtonRoutes');
 const auditLogRoutes = require('./auditLogRoutes');
 const supportMessageRoutes = require('./supportMessageRoutes');
 const receiptRoutes = require('./receiptRoutes');
+const printerRoutes = require('./printerRoutes');
+const tableReceiptRoutes = require('./tableReceiptRoutes');
 
 const router = express.Router();
 
@@ -66,5 +68,7 @@ router.use('/:businessId/custom-buttons', customButtonRoutes);
 router.use('/:businessId/audit-log', auditLogRoutes);
 router.use('/:businessId/messages', supportMessageRoutes);
 router.use('/:businessId/receipts', receiptRoutes);
+router.use('/:businessId/printer-integration', printerRoutes);
+router.use('/:businessId/tables', tableReceiptRoutes);
 
 module.exports = router;

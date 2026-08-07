@@ -636,6 +636,7 @@ const getPublicMenu = asyncHandler(async (req, res) => {
     submissionEnabled: !!business.features?.ordering?.submission,
     callWaiterEnabled: !!business.features?.ordering?.callWaiter,
     requestBillEnabled: !!business.features?.ordering?.requestBill,
+    payBeforeOrderEnabled: !!business.features?.ordering?.payBeforeOrder,
   });
 });
 
@@ -818,6 +819,452 @@ const submitOrder = asyncHandler(async (req, res) => {
   }
 
   res.status(201).json({ order, items: orderItemRows });
+});
+
+// =========================================================================
+// Pay-before-order — self-service feature (features.ordering.payBeforeOrder).
+// When on, "Send order" never creates a normal `pending` order directly.
+// Instead the order + its items are saved immediately (real, server-priced
+// items - never trusted from the client, same rule as submitOrder above)
+// but sit in `awaiting_payment`, invisible to Kitchen/Orders and never
+// pushed to POS, until payment genuinely clears - by card (Tap in-page or
+// a Telr/N-Genius/Ziina redirect), or by cash confirmed by staff. Mirrors
+// the exact same shared-core pattern as the Pay Bill flow above
+// (computeBillContext / finalizePaidBill), just for a not-yet-existing
+// order instead of an already-placed one.
+// =========================================================================
+
+// Validates everything needed to accept a pre-paid order: business,
+// feature flag, pause state, tap, and every item's real server-side
+// price. Returns { errStatus, errMessage } on any failure - never
+// creates anything itself, so a validation failure never leaves an
+// orphaned row behind.
+async function computeOrderCheckoutContext(slug, tapEventId, items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { errStatus: 400, errMessage: 'At least one item is required' };
+  }
+
+  const { data: business } = await supabaseAdmin
+    .from('businesses')
+    .select('id, features, ordering_paused')
+    .eq('slug', slug)
+    .eq('status', 'active')
+    .single();
+  if (!business) return { errStatus: 404, errMessage: 'Business not found' };
+
+  if (business.ordering_paused) {
+    return { errStatus: 400, errMessage: 'Ordering is currently paused' };
+  }
+  if (!business.features?.ordering?.submission || !business.features?.ordering?.payBeforeOrder) {
+    return { errStatus: 404, errMessage: 'Pay-before-order is not available for this business' };
+  }
+
+  const cutoff = new Date(Date.now() - TAP_TOKEN_VALID_MINUTES * 60 * 1000).toISOString();
+  const { data: tapEvent } = await supabaseAdmin
+    .from('events')
+    .select('id, card_id')
+    .eq('id', tapEventId)
+    .eq('business_id', business.id)
+    .eq('type', 'nfc_tap')
+    .gte('created_at', cutoff)
+    .maybeSingle();
+  if (!tapEvent || !tapEvent.card_id) {
+    return { errStatus: 400, errMessage: 'Orders must follow a real tap, and this one has expired or is invalid' };
+  }
+
+  const { data: card } = await supabaseAdmin.from('cards').select('label').eq('id', tapEvent.card_id).maybeSingle();
+  const tableLabel = card?.label || '';
+
+  const menuItemIds = items.map((i) => i.menuItemId);
+  const { data: menuItems } = await supabaseAdmin
+    .from('menu_items')
+    .select('id, name, price, category_id')
+    .in('id', menuItemIds)
+    .eq('business_id', business.id)
+    .eq('is_available', true);
+  if (!menuItems || menuItems.length !== menuItemIds.length) {
+    return { errStatus: 400, errMessage: 'One or more items are no longer available' };
+  }
+
+  const categoryIds = [...new Set(menuItems.map((m) => m.category_id).filter(Boolean))];
+  if (categoryIds.length > 0) {
+    const { data: pausedCategories } = await supabaseAdmin
+      .from('menu_categories')
+      .select('id')
+      .in('id', categoryIds)
+      .eq('paused', true);
+    if (pausedCategories && pausedCategories.length > 0) {
+      return { errStatus: 400, errMessage: 'One or more items are no longer available' };
+    }
+  }
+
+  const allAddonIds = items.flatMap((i) => i.addonIds || []);
+  let addonsById = {};
+  if (allAddonIds.length > 0) {
+    const { data: addons } = await supabaseAdmin.from('menu_item_addons').select('id, name, price').in('id', allAddonIds);
+    addonsById = Object.fromEntries((addons || []).map((a) => [a.id, a]));
+  }
+
+  const menuItemsById = Object.fromEntries(menuItems.map((m) => [m.id, m]));
+  const orderItemRows = items.map((i) => {
+    const menuItem = menuItemsById[i.menuItemId];
+    const selectedAddons = (i.addonIds || []).map((id) => addonsById[id]).filter(Boolean);
+    const addonTotal = selectedAddons.reduce((sum, a) => sum + Number(a.price), 0);
+    return {
+      menu_item_id: menuItem.id,
+      item_name: menuItem.name,
+      unit_price: menuItem.price,
+      quantity: Math.max(1, Number(i.quantity) || 1),
+      note: i.note || '',
+      addons: selectedAddons.map((a) => ({ name: a.name, price: a.price })),
+      addon_total: addonTotal,
+    };
+  });
+  const total = orderItemRows.reduce((sum, i) => sum + (i.unit_price + i.addon_total) * i.quantity, 0);
+
+  let integration = null;
+  if (business.features?.ordering?.posIntegration) {
+    const { data } = await supabaseAdmin
+      .from('pos_integrations')
+      .select('*')
+      .eq('business_id', business.id)
+      .eq('purpose', 'ordering')
+      .eq('enabled', true)
+      .maybeSingle();
+    integration = data;
+  }
+
+  return { business, tapEvent, tableLabel, orderItemRows, total, integration };
+}
+
+// Creates the order + items in `awaiting_payment` - real rows, real
+// prices, but invisible to Kitchen/Orders and never pushed to POS until
+// finalizeOrderPayment runs. Returns { order, orderItemRows } with the
+// inserted item ids attached, needed to point a payment record at them.
+async function createAwaitingOrder({ business, tapEvent, tableLabel, note, orderItemRows, total }) {
+  const { data: order, error: orderError } = await supabaseAdmin
+    .from('orders')
+    .insert({
+      business_id: business.id,
+      card_id: tapEvent.card_id,
+      table_label: tableLabel,
+      note: note || '',
+      total,
+      request_type: 'order',
+      status: 'awaiting_payment',
+      source_event_id: tapEvent.id,
+      pos_sync_status: 'not_applicable',
+    })
+    .select()
+    .single();
+  if (orderError) return { error: orderError };
+
+  const { data: insertedItems, error: itemsError } = await supabaseAdmin
+    .from('order_items')
+    .insert(orderItemRows.map((i) => ({ ...i, order_id: order.id })))
+    .select();
+  if (itemsError) return { error: itemsError };
+
+  return { order, orderItemRows: insertedItems };
+}
+
+// Everything that must happen once pre-payment has genuinely succeeded
+// (verified server-side) - marks items paid, sends the order into the
+// normal kitchen/orders flow, and pushes to POS if integrated. Also the
+// exact function a staff cash confirmation calls, via orderController's
+// recordManualPayment, so both payment paths converge on one place.
+async function finalizeOrderPayment({ order, orderItemRows, integration }) {
+  await supabaseAdmin
+    .from('order_items')
+    .update({ paid: true, cash_pending: false, paid_at: new Date().toISOString() })
+    .eq('order_id', order.id);
+
+  await supabaseAdmin
+    .from('orders')
+    .update({ status: 'pending', pos_sync_status: integration ? 'pending' : 'not_applicable' })
+    .eq('id', order.id);
+
+  if (integration) {
+    const { pushOrderToPos } = require('../utils/posDispatcher');
+    pushOrderToPos(integration.provider, integration.config, order, orderItemRows)
+      .then(async (result) => {
+        await supabaseAdmin
+          .from('orders')
+          .update({
+            pos_sync_status: result.success ? 'synced' : 'failed',
+            pos_external_id: result.externalOrderId || '',
+            pos_sync_error: result.error || '',
+          })
+          .eq('id', order.id);
+      })
+      .catch(() => {}); // fire-and-forget - order already exists regardless
+  }
+}
+
+// Order that never got paid (cancelled or abandoned at checkout) - marked
+// cancelled immediately, exactly the "no order sent to the kitchen"
+// outcome, same principle as a Starbucks order that was never paid for.
+async function cancelAwaitingOrder(orderId) {
+  await supabaseAdmin
+    .from('orders')
+    .update({ status: 'cancelled' })
+    .eq('id', orderId)
+    .eq('status', 'awaiting_payment');
+}
+
+// @route POST /api/public/business/:slug/orders/pay
+// Tap in-page flow. Body: { tapEventId, note, items, tapToken }
+const payOrder = asyncHandler(async (req, res) => {
+  const { tapEventId, note, items, tapToken } = req.body;
+  if (!tapEventId || !tapToken) {
+    return res.status(400).json({ message: 'tapEventId and tapToken are required' });
+  }
+
+  const ctx = await computeOrderCheckoutContext(req.params.slug, tapEventId, items);
+  if (ctx.errStatus) return res.status(ctx.errStatus).json({ message: ctx.errMessage });
+  const { business, tapEvent, tableLabel, orderItemRows: validatedRows, total, integration } = ctx;
+
+  const { data: paymentIntegration } = await supabaseAdmin
+    .from('pos_integrations')
+    .select('*')
+    .eq('business_id', business.id)
+    .eq('purpose', 'payment')
+    .eq('enabled', true)
+    .maybeSingle();
+  if (!paymentIntegration) return res.status(404).json({ message: 'Payment is not available for this business yet' });
+
+  const provider = paymentIntegration.config?.provider || 'tap';
+  if (provider !== 'tap') {
+    return res.status(400).json({ message: 'This business uses redirect-based payment - use the payment session flow' });
+  }
+
+  const created = await createAwaitingOrder({ business, tapEvent, tableLabel, note, orderItemRows: validatedRows, total });
+  if (created.error) return res.status(400).json({ message: created.error.message });
+  const { order, orderItemRows } = created;
+
+  const { createCharge } = require('../utils/tapPaymentsAdapter');
+  const result = await createCharge(paymentIntegration.config, tapToken, total, 'Tavzio order payment');
+
+  const { data: payment, error: paymentError } = await supabaseAdmin
+    .from('payments')
+    .insert({
+      business_id: business.id,
+      card_id: tapEvent.card_id,
+      order_item_ids: orderItemRows.map((i) => i.id),
+      amount: total,
+      tip_amount: 0,
+      status: result.success ? 'completed' : 'failed',
+      provider: 'tap',
+      tap_charge_id: result.chargeId || '',
+      failure_reason: result.error || '',
+      source_event_id: tapEventId,
+    })
+    .select()
+    .single();
+  if (paymentError) return res.status(400).json({ message: paymentError.message });
+
+  if (!result.success) {
+    await cancelAwaitingOrder(order.id);
+    return res.status(402).json({ message: result.error || 'Payment failed - no order was sent to the kitchen', payment });
+  }
+
+  await finalizeOrderPayment({ order, orderItemRows, integration });
+  res.status(201).json({ order, payment });
+});
+
+// @route POST /api/public/business/:slug/orders/pay-session
+// Redirect providers (Telr/N-Genius/Ziina). Body: { tapEventId, note, items }
+const createOrderPaySession = asyncHandler(async (req, res) => {
+  const { tapEventId, note, items } = req.body;
+  if (!tapEventId) return res.status(400).json({ message: 'tapEventId is required' });
+
+  const ctx = await computeOrderCheckoutContext(req.params.slug, tapEventId, items);
+  if (ctx.errStatus) return res.status(ctx.errStatus).json({ message: ctx.errMessage });
+  const { business, tapEvent, tableLabel, orderItemRows: validatedRows, total } = ctx;
+
+  const { data: paymentIntegration } = await supabaseAdmin
+    .from('pos_integrations')
+    .select('*')
+    .eq('business_id', business.id)
+    .eq('purpose', 'payment')
+    .eq('enabled', true)
+    .maybeSingle();
+  if (!paymentIntegration) return res.status(404).json({ message: 'Payment is not available for this business yet' });
+
+  const provider = paymentIntegration.config?.provider;
+  if (provider !== 'telr' && provider !== 'ngenius' && provider !== 'ziina') {
+    return res.status(400).json({ message: 'This business does not use redirect-based payment' });
+  }
+
+  const created = await createAwaitingOrder({ business, tapEvent, tableLabel, note, orderItemRows: validatedRows, total });
+  if (created.error) return res.status(400).json({ message: created.error.message });
+  const { order, orderItemRows } = created;
+
+  const { data: payment, error: paymentError } = await supabaseAdmin
+    .from('payments')
+    .insert({
+      business_id: business.id,
+      card_id: tapEvent.card_id,
+      order_item_ids: orderItemRows.map((i) => i.id),
+      amount: total,
+      tip_amount: 0,
+      status: 'pending',
+      provider,
+      source_event_id: tapEventId,
+    })
+    .select()
+    .single();
+  if (paymentError) return res.status(400).json({ message: paymentError.message });
+
+  const returnUrl = `${process.env.CLIENT_URL}/${req.params.slug}/menu?orderPaymentId=${payment.id}`;
+  const adapter = provider === 'telr'
+    ? require('../utils/telrAdapter')
+    : provider === 'ngenius'
+    ? require('../utils/ngeniusAdapter')
+    : require('../utils/ziinaBillAdapter');
+
+  const session = await adapter.createPaymentSession(paymentIntegration.config, total, 'Tavzio order payment', payment.id, returnUrl);
+  if (!session.success) {
+    await supabaseAdmin.from('payments').update({ status: 'failed', failure_reason: session.error || '' }).eq('id', payment.id);
+    await cancelAwaitingOrder(order.id);
+    return res.status(502).json({ message: session.error || 'Could not start the payment' });
+  }
+
+  await supabaseAdmin.from('payments').update({ provider_ref: session.providerRef }).eq('id', payment.id);
+  res.status(201).json({ paymentId: payment.id, redirectUrl: session.redirectUrl, orderId: order.id });
+});
+
+// @route POST /api/public/business/:slug/orders/confirm-payment
+// Body: { paymentId }
+// Called when the customer lands back from the redirect provider's page.
+// The provider's own status API is the only source of truth - which
+// return URL the customer arrived on proves nothing.
+const confirmOrderPayment = asyncHandler(async (req, res) => {
+  const { paymentId } = req.body;
+  if (!paymentId) return res.status(400).json({ message: 'paymentId is required' });
+
+  const { data: business } = await supabaseAdmin
+    .from('businesses')
+    .select('id, features')
+    .eq('slug', req.params.slug)
+    .eq('status', 'active')
+    .single();
+  if (!business) return res.status(404).json({ message: 'Business not found' });
+
+  const { data: payment } = await supabaseAdmin
+    .from('payments')
+    .select('*')
+    .eq('id', paymentId)
+    .eq('business_id', business.id)
+    .maybeSingle();
+  if (!payment) return res.status(404).json({ message: 'Payment not found' });
+
+  const { data: items } = await supabaseAdmin
+    .from('order_items')
+    .select('*, orders!inner(*)')
+    .in('id', payment.order_item_ids || []);
+  const order = items?.[0]?.orders;
+  if (!order) return res.status(404).json({ message: 'Order not found' });
+
+  if (payment.status === 'completed') return res.json({ status: 'completed', order });
+  if (payment.status === 'failed') {
+    return res.status(402).json({ message: payment.failure_reason || 'Payment failed - no order was sent to the kitchen', status: 'failed' });
+  }
+
+  const { data: paymentIntegration } = await supabaseAdmin
+    .from('pos_integrations')
+    .select('*')
+    .eq('business_id', business.id)
+    .eq('purpose', 'payment')
+    .eq('enabled', true)
+    .maybeSingle();
+  if (!paymentIntegration) return res.status(404).json({ message: 'Payment is not available for this business' });
+
+  const adapter = payment.provider === 'telr'
+    ? require('../utils/telrAdapter')
+    : payment.provider === 'ngenius'
+    ? require('../utils/ngeniusAdapter')
+    : require('../utils/ziinaBillAdapter');
+
+  const check = await adapter.checkPaymentStatus(paymentIntegration.config, payment.provider_ref);
+  if (!check.success) {
+    return res.status(502).json({ message: check.error || 'Could not verify the payment yet', status: 'pending' });
+  }
+
+  if (!check.paid) {
+    await supabaseAdmin.from('payments').update({ status: 'failed', failure_reason: check.statusText || 'Not authorised' }).eq('id', payment.id);
+    await cancelAwaitingOrder(order.id);
+    return res.status(402).json({ message: 'Payment was not completed - no order was sent to the kitchen', status: 'failed' });
+  }
+
+  await supabaseAdmin.from('payments').update({ status: 'completed' }).eq('id', payment.id);
+
+  let integration = null;
+  if (business.features?.ordering?.posIntegration) {
+    const { data } = await supabaseAdmin
+      .from('pos_integrations')
+      .select('*')
+      .eq('business_id', business.id)
+      .eq('purpose', 'ordering')
+      .eq('enabled', true)
+      .maybeSingle();
+    integration = data;
+  }
+
+  const orderItemRows = items.map(({ orders: _orders, ...item }) => item);
+  await finalizeOrderPayment({ order, orderItemRows, integration });
+
+  res.json({ status: 'completed', order });
+});
+
+// @route POST /api/public/business/:slug/orders/pay-cash
+// Body: { tapEventId, note, items }
+// No charge happens here - the order is created and its items flagged
+// cash_pending, same flag Pay Bill's cash flow already uses, so it
+// surfaces on staff's existing Cash Pending queue automatically. Staff
+// confirming the cash payment (orderController.recordManualPayment) is
+// what actually sends it to the kitchen.
+const payOrderWithCash = asyncHandler(async (req, res) => {
+  const { tapEventId, note, items } = req.body;
+  if (!tapEventId) return res.status(400).json({ message: 'tapEventId is required' });
+
+  const ctx = await computeOrderCheckoutContext(req.params.slug, tapEventId, items);
+  if (ctx.errStatus) return res.status(ctx.errStatus).json({ message: ctx.errMessage });
+  const { business, tapEvent, tableLabel, orderItemRows: validatedRows, total } = ctx;
+
+  const created = await createAwaitingOrder({ business, tapEvent, tableLabel, note, orderItemRows: validatedRows, total });
+  if (created.error) return res.status(400).json({ message: created.error.message });
+  const { order, orderItemRows } = created;
+
+  await supabaseAdmin
+    .from('order_items')
+    .update({ cash_pending: true })
+    .in('id', orderItemRows.map((i) => i.id));
+
+  res.status(201).json({ order, message: 'Please pay at the cashier' });
+});
+
+// @route POST /api/public/business/:slug/orders/:orderId/cancel-payment
+// Body: { tapEventId }
+// Customer explicitly backs out of checkout before paying - tap-gated so
+// only the same table that placed it can cancel it, same trust boundary
+// as every other public write in this file.
+const cancelOrderPayment = asyncHandler(async (req, res) => {
+  const { tapEventId } = req.body;
+  if (!tapEventId) return res.status(400).json({ message: 'tapEventId is required' });
+
+  const { data: order } = await supabaseAdmin
+    .from('orders')
+    .select('id, source_event_id')
+    .eq('id', req.params.orderId)
+    .eq('status', 'awaiting_payment')
+    .maybeSingle();
+  if (!order || String(order.source_event_id) !== String(tapEventId)) {
+    return res.status(404).json({ message: 'Order not found' });
+  }
+
+  await cancelAwaitingOrder(order.id);
+  res.json({ message: 'Order cancelled - nothing was sent to the kitchen' });
 });
 
 // @route GET /api/public/business/:slug/services
@@ -1538,6 +1985,11 @@ module.exports = {
   claimReward,
   getPublicMenu,
   submitOrder,
+  payOrder,
+  createOrderPaySession,
+  confirmOrderPayment,
+  payOrderWithCash,
+  cancelOrderPayment,
   getPublicServices,
   submitBooking,
   markItemsCashPending,

@@ -173,16 +173,29 @@ const getReceiptPdf = asyncHandler(async (req, res) => {
   doc.fontSize(10).fillColor('#666').font('Helvetica')
     .text(`No. ${receipt.receipt_number}`, { align: 'right' })
     .text(`Date: ${new Date(receipt.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })}`, { align: 'right' });
-  if (receipt.period_label) {
-    doc.text(`Period: ${receipt.period_label}`, { align: 'right' });
-  }
   doc.moveDown(1);
 
   doc.moveTo(56, doc.y).lineTo(539, doc.y).strokeColor(brass).lineWidth(1).stroke();
   doc.moveDown(0.8);
 
+  // Welcome / thank-you framing - every receipt reads as a real piece of
+  // correspondence, not just a bare price table. Personalized with the
+  // business name; falls back gracefully if it's ever missing.
+  const businessName = business?.name || 'your business';
+  doc.fontSize(10.5).fillColor('#333').font('Helvetica').text(
+    `Welcome to ${legalName}! Thank you for trusting us to power ${businessName}'s digital guest experience. ` +
+    `This receipt confirms the services below, issued under the terms of our agreement with you.`,
+    { width: 483, align: 'left' }
+  );
+  doc.moveDown(0.6);
+
+  if (receipt.period_label) {
+    doc.fontSize(10.5).fillColor('#333').font('Helvetica').text(receipt.period_label, { width: 483, align: 'left' });
+    doc.moveDown(0.6);
+  }
+
   doc.fontSize(11).fillColor(ink).font('Helvetica-Bold').text('Billed to');
-  doc.fontSize(11).fillColor('#333').font('Helvetica').text(business?.name || 'Business');
+  doc.fontSize(11).fillColor('#333').font('Helvetica').text(businessName);
   doc.moveDown(1.2);
 
   // Line items table
@@ -206,9 +219,15 @@ const getReceiptPdf = asyncHandler(async (req, res) => {
     .text('Total', 56, y + 14)
     .text(`AED ${Number(receipt.amount).toFixed(2)}`, 420, y + 14, { width: 119, align: 'right' });
 
+  // The two calls above leave PDFKit's internal cursor (doc.x) sitting at
+  // 420 (the last text call's x) - anything written next without an
+  // explicit x would inherit that and get pushed off the right edge.
+  // Reset both x and y explicitly to a fresh line below the total.
+  let notesY = y + 14 + 26;
   if (receipt.notes) {
-    doc.moveDown(2);
-    doc.fontSize(10).font('Helvetica').fillColor('#666').text(receipt.notes, { width: 483 });
+    doc.fontSize(10).font('Helvetica-Bold').fillColor(ink).text('Notes', 56, notesY, { width: 483 });
+    notesY = doc.y + 4;
+    doc.fontSize(10).font('Helvetica').fillColor('#666').text(receipt.notes, 56, notesY, { width: 483 });
   }
 
   // Stamp and signature - whatever was captured on THIS receipt at the

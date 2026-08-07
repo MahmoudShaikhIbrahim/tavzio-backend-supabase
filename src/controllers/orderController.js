@@ -13,6 +13,11 @@ const listOrders = asyncHandler(async (req, res) => {
     .select('*, order_items(*)')
     .eq('business_id', req.params.businessId)
     .eq('request_type', 'order')
+    // A pay-before-order order sitting in awaiting_payment hasn't been
+    // paid for (or is mid-checkout) yet - it was never "sent", so it
+    // never appears here, exactly like an unpaid Starbucks order never
+    // reaches the barista.
+    .neq('status', 'awaiting_payment')
     .order('created_at', { ascending: false });
 
   if (req.query.status) query = query.eq('status', req.query.status);
@@ -278,7 +283,7 @@ const recordManualPayment = asyncHandler(async (req, res) => {
   // a different business could never settle someone else's order.
   const { data: order, error: orderError } = await req.supabase
     .from('orders')
-    .select('id, card_id, order_items(*)')
+    .select('id, status, card_id, order_items(*)')
     .eq('id', req.params.orderId)
     .eq('business_id', req.params.businessId)
     .single();
@@ -316,6 +321,51 @@ const recordManualPayment = asyncHandler(async (req, res) => {
     .from('order_items')
     .update({ paid: true, cash_pending: false, paid_at: new Date().toISOString() })
     .in('id', settledIds);
+
+  // Pay-before-order cash flow: this order was never sent to the kitchen
+  // (sitting in awaiting_payment). Confirming the cash payment is the
+  // moment it becomes real - same "pay at cashier, then get your order"
+  // rule the feature was built around. A normal, already-placed order
+  // (status already 'pending'/'ready'/etc) is untouched by this.
+  if (order.status === 'awaiting_payment') {
+    let integration = null;
+    const { data: business } = await supabaseAdmin
+      .from('businesses')
+      .select('features')
+      .eq('id', req.params.businessId)
+      .maybeSingle();
+    if (business?.features?.ordering?.posIntegration) {
+      const { data } = await supabaseAdmin
+        .from('pos_integrations')
+        .select('*')
+        .eq('business_id', req.params.businessId)
+        .eq('purpose', 'ordering')
+        .eq('enabled', true)
+        .maybeSingle();
+      integration = data;
+    }
+
+    await supabaseAdmin
+      .from('orders')
+      .update({ status: 'pending', pos_sync_status: integration ? 'pending' : 'not_applicable' })
+      .eq('id', order.id);
+
+    if (integration) {
+      const { pushOrderToPos } = require('../utils/posDispatcher');
+      pushOrderToPos(integration.provider, integration.config, order, order.order_items)
+        .then(async (result) => {
+          await supabaseAdmin
+            .from('orders')
+            .update({
+              pos_sync_status: result.success ? 'synced' : 'failed',
+              pos_external_id: result.externalOrderId || '',
+              pos_sync_error: result.error || '',
+            })
+            .eq('id', order.id);
+        })
+        .catch(() => {});
+    }
+  }
 
   await maybeAutoCloseTable(supabaseAdmin, req.params.businessId, order.card_id);
 
