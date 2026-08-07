@@ -141,6 +141,23 @@ const voidOrderItem = asyncHandler(async (req, res) => {
     .single();
   if (error || !item) return res.status(404).json({ message: 'Item not found' });
 
+  // If that was the last live item on this order (everything else is
+  // either already paid or already voided too), the order itself is now
+  // an empty shell with nothing left to deliver or collect. Without this,
+  // it used to sit on the Orders page forever showing "All items deleted"
+  // with no way to make it go away - Clear table's own "nothing
+  // outstanding" check treated it the same as a fully-paid order and
+  // silently skipped it every time.
+  const { data: siblings } = await supabaseAdmin
+    .from('order_items')
+    .select('paid, voided')
+    .eq('order_id', req.params.orderId);
+  const stillHasLiveItems = (siblings || []).some((i) => !i.paid && !i.voided);
+  const hasAnyPaidItems = (siblings || []).some((i) => i.paid);
+  if (!stillHasLiveItems && !hasAnyPaidItems) {
+    await supabaseAdmin.from('orders').update({ voided: true }).eq('id', req.params.orderId);
+  }
+
   res.json(item);
 });
 
@@ -164,14 +181,22 @@ const clearTable = asyncHandler(async (req, res) => {
   const affectedOrderIds = [];
   for (const order of orders || []) {
     const hasUnpaidUnvoidedItems = order.order_items.some((i) => !i.paid && !i.voided);
-    if (!hasUnpaidUnvoidedItems) continue; // nothing outstanding on this order, leave it alone
+    const hasPaidItems = order.order_items.some((i) => i.paid);
+    // Skip only a genuinely fully-paid order - that one belongs to Mark
+    // Completed, not Clear table. An order with nothing left because
+    // every item was individually deleted (not paid) has no unpaid items
+    // either, but it's not "done" - it's empty, and needs voiding here
+    // too or it sits on the Orders page forever with no way to clear it.
+    if (!hasUnpaidUnvoidedItems && hasPaidItems) continue;
 
     affectedOrderIds.push(order.id);
-    await req.supabase
-      .from('order_items')
-      .update({ voided: true })
-      .eq('order_id', order.id)
-      .eq('paid', false);
+    if (hasUnpaidUnvoidedItems) {
+      await req.supabase
+        .from('order_items')
+        .update({ voided: true })
+        .eq('order_id', order.id)
+        .eq('paid', false);
+    }
   }
 
   if (affectedOrderIds.length > 0) {
