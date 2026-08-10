@@ -143,7 +143,7 @@ const deleteBusiness = asyncHandler(async (req, res) => {
 //     links?: { <linkKey>: { enabled: boolean } }  // only `enabled` is
 //       ever honored here - the URL `value` stays owner-editable via
 //       updateBusiness, never touched by this endpoint.
-const NESTED_FEATURE_KEYS = ['ordering', 'booking', 'accessMethods'];
+const NESTED_FEATURE_KEYS = ['ordering', 'booking', 'accessMethods', 'inventory'];
 
 const setBusinessFeatures = asyncHandler(async (req, res) => {
   const { links: linksPatch, ...featuresPatch } = req.body;

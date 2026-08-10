@@ -54,7 +54,7 @@ const register = asyncHandler(async (req, res) => {
 
   await supabaseAdmin
     .from('profiles')
-    .update({ business_id: business.id })
+    .update({ business_id: business.id, must_change_password: true })
     .eq('id', userId);
 
   res.status(201).json({
@@ -222,4 +222,37 @@ const confirmDevice = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { register, login, refresh, me, updateMyTheme, confirmDevice };
+// @route PATCH /api/auth/change-password
+// Body: { currentPassword, newPassword }
+// Used both for the forced first-login change (owner accounts start
+// with must_change_password=true, since the super admin set that
+// original password directly and knows it) and for a voluntary change
+// anytime after. Verifying the current password first (via a real
+// sign-in attempt) matters even though the user is already
+// authenticated - it stops someone on an already-unlocked device from
+// silently taking over the account's password.
+const changePassword = asyncHandler(async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ message: 'currentPassword and newPassword are required' });
+  }
+  if (newPassword.length < 8) {
+    return res.status(400).json({ message: 'New password must be at least 8 characters' });
+  }
+
+  const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(req.user.id);
+  const email = authUser?.user?.email;
+  if (!email) return res.status(400).json({ message: 'Could not verify your account' });
+
+  const { error: verifyError } = await supabasePublic.auth.signInWithPassword({ email, password: currentPassword });
+  if (verifyError) return res.status(401).json({ message: 'Current password is incorrect' });
+
+  const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(req.user.id, { password: newPassword });
+  if (updateError) return res.status(400).json({ message: updateError.message });
+
+  await supabaseAdmin.from('profiles').update({ must_change_password: false }).eq('id', req.user.id);
+
+  res.json({ message: 'Password updated' });
+});
+
+module.exports = { register, login, refresh, me, updateMyTheme, confirmDevice, changePassword };

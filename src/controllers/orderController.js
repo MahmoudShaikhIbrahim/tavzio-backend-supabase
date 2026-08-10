@@ -375,6 +375,11 @@ const recordManualPayment = asyncHandler(async (req, res) => {
       .update({ status: 'pending', pos_sync_status: integration ? 'pending' : 'not_applicable' })
       .eq('id', order.id);
 
+    if (business?.features?.inventory?.enabled) {
+      const { deductStock } = require('../utils/inventoryStock');
+      deductStock({ businessId: req.params.businessId, orderItemRows: order.order_items, orderId: order.id }).catch(() => {});
+    }
+
     if (integration) {
       const { pushOrderToPos } = require('../utils/posDispatcher');
       pushOrderToPos(integration.provider, integration.config, order, order.order_items)

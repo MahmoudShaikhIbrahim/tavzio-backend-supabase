@@ -45,4 +45,39 @@ function sendDeviceConfirmation({ email, confirmUrl, businessName }) {
   });
 }
 
-module.exports = { notifyCardUsed, sendDeviceConfirmation };
+function sendContractSignLink({ email, businessName, signUrl }) {
+  return sendMail({
+    to: email,
+    subject: `Your Tavzio service agreement is ready to sign`,
+    text: `Hi,\n\nYour Tavzio service agreement for ${businessName} is ready. Review and sign it here - takes under a minute, no account needed:\n\n${signUrl}\n\nOnce signed, you'll be asked to add a payment method to activate your subscription.\n\n- Tavzio`,
+  });
+}
+
+function sendContractSignedReceipt({ email, businessName, receiptNumber, amountAed, pdfUrl }) {
+  return sendMail({
+    to: email,
+    subject: `Receipt ${receiptNumber} - AED ${amountAed.toFixed(2)}`,
+    text: `Hi,\n\nYour payment of AED ${amountAed.toFixed(2)} for ${businessName} was received automatically. Receipt ${receiptNumber} is attached to your account - view it here:\n\n${pdfUrl}\n\n- Tavzio`,
+  });
+}
+
+function sendPaymentFailedWarning({ email, businessName, attempt }) {
+  return sendMail({
+    to: email,
+    subject: `Payment issue with your Tavzio subscription`,
+    text: `Hi,\n\nA scheduled payment for ${businessName}'s Tavzio subscription didn't go through (attempt ${attempt}). Please check your card details are current. If this isn't resolved, your account may be suspended.\n\n- Tavzio`,
+  });
+}
+
+function sendAccountSuspended({ email, businessName }) {
+  return sendMail({
+    to: email,
+    subject: `Your Tavzio account has been suspended`,
+    text: `Hi,\n\n${businessName}'s Tavzio account has been suspended due to repeated failed payments. Please contact us to update your payment details and reactivate your account.\n\n- Tavzio`,
+  });
+}
+
+module.exports = {
+  notifyCardUsed, sendDeviceConfirmation, sendMail,
+  sendContractSignLink, sendContractSignedReceipt, sendPaymentFailedWarning, sendAccountSuspended,
+};

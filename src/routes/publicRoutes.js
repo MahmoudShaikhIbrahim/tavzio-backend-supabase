@@ -1,4 +1,5 @@
 const express = require('express');
+const { submitLead } = require('../controllers/leadController');
 const {
   resolveCardTap,
   getPublicBusiness,
@@ -44,5 +45,7 @@ router.post('/business/:slug/bill/cash-pending', markItemsCashPending);
 router.post('/business/:slug/bill/pay', payBill);
 router.post('/business/:slug/bill/pay-session', createPaySession);
 router.post('/business/:slug/bill/confirm', confirmPaySession);
+
+router.post('/leads', submitLead);
 
 module.exports = router;

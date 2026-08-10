@@ -1,6 +1,6 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
-const { register, login, refresh, me, updateMyTheme, confirmDevice } = require('../controllers/authController');
+const { register, login, refresh, me, updateMyTheme, confirmDevice, changePassword } = require('../controllers/authController');
 const { protect } = require('../middleware/auth');
 
 const router = express.Router();
@@ -22,6 +22,7 @@ router.post('/login', loginLimiter, login);
 router.post('/refresh', refresh);
 router.get('/me', protect, me);
 router.patch('/theme', protect, updateMyTheme);
+router.patch('/change-password', protect, loginLimiter, changePassword);
 router.get('/confirm-device/:pendingId', confirmDevice);
 
 module.exports = router;

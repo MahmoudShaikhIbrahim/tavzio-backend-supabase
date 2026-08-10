@@ -755,6 +755,17 @@ const submitOrder = asyncHandler(async (req, res) => {
       };
     });
     total = orderItemRows.reduce((sum, i) => sum + (i.unit_price + i.addon_total) * i.quantity, 0);
+
+    // Inventory (Tier 2) - only checked if the business has turned it
+    // on. blockOrdersOnLowStock defaults true, but a business can allow
+    // orders through anyway and just track the shortfall.
+    if (business.features?.inventory?.enabled) {
+      const { checkStockAvailability } = require('../utils/inventoryStock');
+      const stockCheck = await checkStockAvailability({ orderItemRows });
+      if (!stockCheck.ok && business.features.inventory.blockOrdersOnLowStock !== false) {
+        return res.status(400).json({ message: stockCheck.message });
+      }
+    }
   }
 
   // Only real food/drink orders get pushed to POS - a "call waiter" ping
@@ -798,6 +809,14 @@ const submitOrder = asyncHandler(async (req, res) => {
       .from('order_items')
       .insert(orderItemRows.map((i) => ({ ...i, order_id: order.id })));
     if (itemsError) return res.status(400).json({ message: itemsError.message });
+  }
+
+  // Deduct stock now that the order genuinely exists - the earlier check
+  // already confirmed availability (or blocking was off), so this is
+  // just recording what actually got consumed.
+  if (requestType === 'order' && business.features?.inventory?.enabled && orderItemRows.length > 0) {
+    const { deductStock } = require('../utils/inventoryStock');
+    deductStock({ businessId: business.id, orderItemRows, orderId: order.id }).catch(() => {});
   }
 
   // Push to POS if enabled - failures here never block the order from
@@ -934,6 +953,17 @@ async function computeOrderCheckoutContext(slug, tapEventId, items) {
     integration = data;
   }
 
+  // Same inventory check the normal order-submission path already does -
+  // no reason a pay-before-order business should be able to charge a
+  // customer for something the kitchen can't actually make.
+  if (business.features?.inventory?.enabled) {
+    const { checkStockAvailability } = require('../utils/inventoryStock');
+    const stockCheck = await checkStockAvailability({ orderItemRows });
+    if (!stockCheck.ok && business.features.inventory.blockOrdersOnLowStock !== false) {
+      return { errStatus: 400, errMessage: stockCheck.message };
+    }
+  }
+
   return { business, tapEvent, tableLabel, orderItemRows, total, integration };
 }
 
@@ -973,7 +1003,7 @@ async function createAwaitingOrder({ business, tapEvent, tableLabel, note, order
 // normal kitchen/orders flow, and pushes to POS if integrated. Also the
 // exact function a staff cash confirmation calls, via orderController's
 // recordManualPayment, so both payment paths converge on one place.
-async function finalizeOrderPayment({ order, orderItemRows, integration }) {
+async function finalizeOrderPayment({ order, orderItemRows, integration, business }) {
   await supabaseAdmin
     .from('order_items')
     .update({ paid: true, cash_pending: false, paid_at: new Date().toISOString() })
@@ -983,6 +1013,15 @@ async function finalizeOrderPayment({ order, orderItemRows, integration }) {
     .from('orders')
     .update({ status: 'pending', pos_sync_status: integration ? 'pending' : 'not_applicable' })
     .eq('id', order.id);
+
+  // Same deduction the normal order-submission path does, just happening
+  // at the moment payment clears instead of at order creation - a
+  // pay-before-order order was never "sent" until now, so stock was
+  // never touched until now either.
+  if (business?.features?.inventory?.enabled) {
+    const { deductStock } = require('../utils/inventoryStock');
+    deductStock({ businessId: business.id, orderItemRows, orderId: order.id }).catch(() => {});
+  }
 
   if (integration) {
     const { pushOrderToPos } = require('../utils/posDispatcher');
@@ -1068,7 +1107,7 @@ const payOrder = asyncHandler(async (req, res) => {
     return res.status(402).json({ message: result.error || 'Payment failed - no order was sent to the kitchen', payment });
   }
 
-  await finalizeOrderPayment({ order, orderItemRows, integration });
+  await finalizeOrderPayment({ order, orderItemRows, integration, business });
   res.status(201).json({ order, payment });
 });
 
@@ -1212,7 +1251,7 @@ const confirmOrderPayment = asyncHandler(async (req, res) => {
   }
 
   const orderItemRows = items.map(({ orders: _orders, ...item }) => item);
-  await finalizeOrderPayment({ order, orderItemRows, integration });
+  await finalizeOrderPayment({ order, orderItemRows, integration, business });
 
   res.json({ status: 'completed', order });
 });

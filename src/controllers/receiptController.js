@@ -144,13 +144,13 @@ const getReceiptPdf = asyncHandler(async (req, res) => {
 
   const { data: business } = await req.supabase
     .from('businesses')
-    .select('name')
+    .select('name, trn')
     .eq('id', req.params.businessId)
     .single();
 
   const { data: branding } = await req.supabase
     .from('receipt_branding')
-    .select('legal_name')
+    .select('legal_name, issuer_trn')
     .limit(1)
     .maybeSingle();
 
@@ -167,6 +167,9 @@ const getReceiptPdf = asyncHandler(async (req, res) => {
   // Header
   doc.fontSize(22).fillColor(ink).font('Helvetica-Bold').text(legalName, { align: 'left' });
   doc.fontSize(10).fillColor(brass).font('Helvetica').text('Tap. Connect. Grow.', { align: 'left' });
+  if (branding?.issuer_trn) {
+    doc.fontSize(9).fillColor('#666').font('Helvetica').text(`TRN: ${branding.issuer_trn}`, { align: 'left' });
+  }
   doc.moveDown(1.5);
 
   doc.fontSize(18).fillColor(ink).font('Helvetica-Bold').text('RECEIPT', { align: 'right' });
@@ -196,6 +199,9 @@ const getReceiptPdf = asyncHandler(async (req, res) => {
 
   doc.fontSize(11).fillColor(ink).font('Helvetica-Bold').text('Billed to');
   doc.fontSize(11).fillColor('#333').font('Helvetica').text(businessName);
+  if (business?.trn) {
+    doc.fontSize(9).fillColor('#666').font('Helvetica').text(`Client TRN: ${business.trn}`);
+  }
   doc.moveDown(1.2);
 
   // Line items table
@@ -269,7 +275,7 @@ const getReceiptBranding = asyncHandler(async (req, res) => {
 // super_admin only. Updates the CURRENTLY ACTIVE stamp/signature/legal
 // name - affects only receipts created from this point forward.
 const updateReceiptBranding = asyncHandler(async (req, res) => {
-  const { stampUrl, signatureUrl, legalName } = req.body;
+  const { stampUrl, signatureUrl, legalName, issuerTrn } = req.body;
 
   const { data: existing } = await req.supabase.from('receipt_branding').select('id').limit(1).maybeSingle();
 
@@ -277,6 +283,7 @@ const updateReceiptBranding = asyncHandler(async (req, res) => {
     stamp_url: stampUrl ?? existing?.stamp_url ?? '',
     signature_url: signatureUrl ?? existing?.signature_url ?? '',
     legal_name: legalName ?? existing?.legal_name ?? '',
+    issuer_trn: issuerTrn ?? existing?.issuer_trn ?? '',
     updated_at: new Date().toISOString(),
   };
 
@@ -368,9 +375,93 @@ const registerZiinaWebhook = asyncHandler(async (req, res) => {
   res.json({ message: `Registered ${webhookUrl} as the account-wide Ziina webhook.` });
 });
 
+// @route POST /api/businesses/:businessId/contracts/:contractId/receipts/next
+// super_admin only. Generates the next installment receipt for a signed
+// contract automatically - amount, period label, and installment number
+// all derived from the contract itself, not typed in by hand each time.
+const generateContractReceipt = asyncHandler(async (req, res) => {
+  const { data: contract } = await req.supabase.from('contracts').select('*').eq('id', req.params.contractId).single();
+  if (!contract) return res.status(404).json({ message: 'Contract not found' });
+  if (contract.status !== 'signed' && contract.status !== 'active') {
+    return res.status(400).json({ message: 'Contract must be signed before receipts can be issued against it' });
+  }
+
+  const periodsPerYear = contract.payment_frequency === 'monthly' ? 12 : contract.payment_frequency === 'quarterly' ? 4 : 1;
+  const { count: alreadyIssued } = await req.supabase
+    .from('receipts')
+    .select('id', { count: 'exact', head: true })
+    .eq('contract_id', contract.id);
+  const installmentNumber = (alreadyIssued || 0) + 1;
+  if (installmentNumber > periodsPerYear) {
+    return res.status(400).json({ message: 'All installments for this contract term have already been issued' });
+  }
+
+  const perPayment = contract.annual_total_aed / periodsPerYear;
+  const { data: business } = await req.supabase.from('businesses').select('name').eq('id', req.params.businessId).single();
+
+  const start = new Date(contract.start_date);
+  const periodStart = new Date(start);
+  const monthsPerPeriod = 12 / periodsPerYear;
+  periodStart.setMonth(periodStart.getMonth() + (installmentNumber - 1) * monthsPerPeriod);
+  const periodEnd = new Date(periodStart);
+  periodEnd.setMonth(periodEnd.getMonth() + monthsPerPeriod);
+  const fmt = (d) => d.toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' });
+  const periodLabel = `Installment ${installmentNumber} of ${periodsPerYear} under Contract ${contract.contract_number}, covering ${fmt(periodStart)} to ${fmt(periodEnd)}.`;
+
+  const lineItems = [
+    { description: `Tavzio platform subscription (${contract.payment_frequency} installment under Contract ${contract.contract_number})`, amount: perPayment },
+  ];
+
+  const { data: branding } = await req.supabase.from('receipt_branding').select('*').limit(1).maybeSingle();
+  const receiptNumber = await nextReceiptNumber(req.supabase);
+
+  const { data, error } = await req.supabase
+    .from('receipts')
+    .insert({
+      business_id: req.params.businessId,
+      receipt_number: receiptNumber,
+      receipt_type: 'monthly',
+      line_items: lineItems,
+      amount: perPayment,
+      period_label: periodLabel,
+      notes: '',
+      stamp_url: branding?.stamp_url || '',
+      signature_url: branding?.signature_url || '',
+      issued_by: req.user.id,
+      contract_id: contract.id,
+      installment_number: installmentNumber,
+      installment_total: periodsPerYear,
+    })
+    .select()
+    .single();
+  if (error) return res.status(400).json({ message: error.message });
+
+  const appUrl = process.env.CLIENT_URL || '';
+  const ziinaResult = await createPaymentIntent({
+    amountAed: perPayment,
+    message: `${business?.name || 'Tavzio'} - Receipt ${receiptNumber}`,
+    successUrl: `${appUrl}/admin/dashboard/receipts?paid=${data.id}`,
+    cancelUrl: `${appUrl}/admin/dashboard/receipts`,
+    failureUrl: `${appUrl}/admin/dashboard/receipts`,
+  });
+
+  if (ziinaResult.success) {
+    const { data: updated } = await req.supabase
+      .from('receipts')
+      .update({ ziina_payment_intent_id: ziinaResult.paymentIntentId, payment_link_url: ziinaResult.redirectUrl })
+      .eq('id', data.id)
+      .select()
+      .single();
+    return res.status(201).json(updated);
+  }
+
+  res.status(201).json({ ...data, ziinaError: ziinaResult.error });
+});
+
 module.exports = {
   listReceipts,
   createReceipt,
+  generateContractReceipt,
   voidReceipt,
   getReceiptPdf,
   getReceiptBranding,

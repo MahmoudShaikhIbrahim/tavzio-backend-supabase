@@ -12,6 +12,9 @@ const businessRoutes = require('./routes/businessRoutes');
 const publicRoutes = require('./routes/publicRoutes');
 const messagesRoutes = require('./routes/messagesRoutes');
 const ziinaRoutes = require('./routes/ziinaRoutes');
+const publicContractRoutes = require('./routes/publicContractRoutes');
+const stripeRoutes = require('./routes/stripeRoutes');
+const leadRoutes = require('./routes/leadRoutes');
 
 const app = express();
 
@@ -46,6 +49,9 @@ app.use('/api/businesses', apiLimiter, businessRoutes);
 app.use('/api/public', publicLimiter, publicRoutes);
 app.use('/api/messages', apiLimiter, messagesRoutes);
 app.use('/api/ziina', apiLimiter, ziinaRoutes);
+app.use('/api/public/contracts', publicLimiter, publicContractRoutes);
+app.use('/api/stripe', stripeRoutes);
+app.use('/api/leads', apiLimiter, leadRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
