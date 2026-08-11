@@ -21,7 +21,7 @@ const protect = asyncHandler(async (req, res, next) => {
 
   const { data: profile, error: profileError } = await supabaseAdmin
     .from('profiles')
-    .select('id, name, role, business_id, is_active, theme_preference, must_change_password')
+    .select('id, name, role, business_id, is_active, theme_preference, must_change_password, job_role')
     .eq('id', data.user.id)
     .single();
 
@@ -56,4 +56,31 @@ const enforceTenant = (req, res, next) => {
   next();
 };
 
-module.exports = { protect, authorize, enforceTenant };
+// Real, backend-enforced permission checks for hotel-context staff
+// roles (front_desk, waiter, housekeeping, etc) - not a UI-only gate.
+// super_admin and business_owner always pass: an owner has implicit
+// full access to their own business by definition, and never needs a
+// job_role or a permissions lookup at all - only `staff` accounts get
+// checked against their specific job_role's permission set.
+const requirePermission = (permissionKey) => async (req, res, next) => {
+  if (!req.user) return res.status(401).json({ message: 'Not authorized' });
+  if (req.user.role === 'super_admin' || req.user.role === 'business_owner') return next();
+
+  if (req.user.role !== 'staff' || !req.user.job_role) {
+    return res.status(403).json({ message: `Forbidden: missing permission "${permissionKey}"` });
+  }
+
+  const { data: roleDef } = await supabaseAdmin
+    .from('role_permissions')
+    .select('permissions')
+    .eq('role_key', req.user.job_role)
+    .maybeSingle();
+
+  const permissions = roleDef?.permissions || [];
+  if (!permissions.includes(permissionKey)) {
+    return res.status(403).json({ message: `Forbidden: your role (${req.user.job_role}) doesn't include "${permissionKey}"` });
+  }
+  next();
+};
+
+module.exports = { protect, authorize, enforceTenant, requirePermission };

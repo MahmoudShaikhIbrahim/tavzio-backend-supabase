@@ -95,10 +95,56 @@ async function checkPaymentStatus(config, providerRef) {
 
     const statusCode = Number(data.order?.status?.code);
     const paid = statusCode === 3 || statusCode === 2;
-    return { success: true, paid, statusCode, statusText: data.order?.status?.text || '' };
+    return { success: true, paid, statusCode, statusText: data.order?.status?.text || '', tranRef: data.order?.transaction?.ref || '' };
   } catch (err) {
     return { success: false, paid: false, error: err.message };
   }
 }
 
-module.exports = { createPaymentSession, checkPaymentStatus };
+// Refund/void via Telr's remote.html endpoint - confirmed against real
+// integration examples this is a genuinely different endpoint from
+// order.json, with a different auth model (needs the actual transaction
+// reference captured at checkout, not the order ref) and a URL-encoded
+// response format, not JSON. Requires tranRef to have been stored at
+// checkout time (Telr's check response includes transaction.ref).
+async function createRefund(config, tranRef, amountAed) {
+  if (!config?.storeId || !config?.authKey) {
+    return { success: false, error: 'Telr is not configured for this business' };
+  }
+  if (!tranRef) {
+    return { success: false, error: 'Missing Telr transaction reference to refund - this payment may predate refund tracking' };
+  }
+
+  try {
+    const params = new URLSearchParams({
+      ivp_store: config.storeId,
+      ivp_authkey: config.authKey,
+      ivp_trantype: 'refund',
+      ivp_tranclass: 'ecom',
+      ivp_currency: 'AED',
+      ivp_amount: String(amountAed),
+      ivp_test: config.testMode ? '1' : '0',
+      tran_ref: tranRef,
+    });
+
+    const response = await fetch('https://secure.telr.com/gateway/remote.html', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
+
+    // Response is URL-encoded key=value pairs, not JSON, unlike every
+    // other Telr endpoint - parsed the same way a query string would be.
+    const text = await response.text();
+    const result = Object.fromEntries(new URLSearchParams(text));
+
+    if (result.auth_status !== 'A') {
+      return { success: false, error: result.auth_message || 'Telr refund was not authorised' };
+    }
+    return { success: true, refundId: result.auth_tranref || '', status: 'refunded' };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+module.exports = { createPaymentSession, checkPaymentStatus, createRefund };

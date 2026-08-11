@@ -57,7 +57,7 @@ async function issueSessionFor(userId) {
 const resolveCardTap = asyncHandler(async (req, res) => {
   const { data: card, error: cardError } = await supabaseAdmin
     .from('cards')
-    .select('id, status, linked_user_id, business_id, businesses(slug, status, name, features)')
+    .select('id, status, linked_user_id, business_id, room_id, businesses(slug, status, name, features, category)')
     .eq('uid', req.params.cardUid)
     .single();
 
@@ -167,6 +167,15 @@ const resolveCardTap = asyncHandler(async (req, res) => {
     .single();
 
   if (eventError) return res.status(400).json({ message: eventError.message });
+
+  // A card placed in a hotel room routes to the guest portal instead of
+  // the normal restaurant-style landing page - a fundamentally different
+  // experience (room service, hotel requests, view bill) for a
+  // fundamentally different kind of business, decided by Business Type
+  // + whether this specific card was assigned to a room.
+  if (business.category === 'hotel' && card.room_id) {
+    return res.json({ redirect: `/${business.slug}/room/${card.room_id}`, tapEventId: event.id, roomId: card.room_id });
+  }
 
   res.json({ redirect: `/${business.slug}`, tapEventId: event.id });
 });
@@ -1986,7 +1995,7 @@ const confirmPaySession = asyncHandler(async (req, res) => {
 
   const { data: completed } = await supabaseAdmin
     .from('payments')
-    .update({ status: 'completed' })
+    .update({ status: 'completed', telr_tran_ref: payment.provider === 'telr' ? (check.tranRef || '') : undefined })
     .eq('id', payment.id)
     .select()
     .single();

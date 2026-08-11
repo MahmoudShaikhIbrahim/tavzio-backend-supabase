@@ -17,7 +17,18 @@ const getBusiness = asyncHandler(async (req, res) => {
 
 // @route PATCH /api/businesses/:businessId
 const updateBusiness = asyncHandler(async (req, res) => {
-  const { name, logoUrl, coverImageUrl, description, category, theme, links, notificationSettings, orderingPaused } = req.body;
+  const { name, logoUrl, coverImageUrl, description, category, theme, links, notificationSettings, orderingPaused, trn } = req.body;
+
+  // Business Type (category) determines which product architecture a
+  // business gets (restaurant/F&B POS vs the eventual hotel PMS+F&B
+  // system) - changing it after onboarding is a structural operation,
+  // not a normal profile edit. Locked to super_admin only, enforced
+  // here regardless of what the frontend does or doesn't show -
+  // a direct API call from a business_owner/staff token must be
+  // rejected exactly the same as if they'd never sent it at all.
+  if (category !== undefined && req.user.role !== 'super_admin') {
+    return res.status(403).json({ message: 'Business Type can only be changed by Tavzio - contact us if this needs to change.' });
+  }
 
   const { data: existing, error: fetchError } = await req.supabase
     .from('businesses')
@@ -30,11 +41,12 @@ const updateBusiness = asyncHandler(async (req, res) => {
   if (name !== undefined) update.name = name;
   if (logoUrl !== undefined) update.logo_url = logoUrl;
   if (coverImageUrl !== undefined) update.cover_image_url = coverImageUrl;
+  if (trn !== undefined) update.trn = trn;
+  if (category !== undefined) update.category = category; // only reachable here if req.user.role === 'super_admin', checked above
   if (description !== undefined) {
     update.description = description;
     update.description_i18n = await translateToAllLanguages(description).catch(() => ({}));
   }
-  if (category !== undefined) update.category = category;
   if (orderingPaused !== undefined) update.ordering_paused = !!orderingPaused;
   if (theme !== undefined) update.theme = { ...existing.theme, ...theme };
 

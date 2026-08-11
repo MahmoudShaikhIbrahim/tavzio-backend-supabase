@@ -28,6 +28,11 @@ const supportMessageRoutes = require('./supportMessageRoutes');
 const receiptRoutes = require('./receiptRoutes');
 const contractRoutes = require('./contractRoutes');
 const inventoryRoutes = require('./inventoryRoutes');
+const tillRoutes = require('./tillRoutes');
+const tableManagementRoutes = require('./tableManagementRoutes');
+const waitlistRoutes = require('./waitlistRoutes');
+const hotelRoutes = require('./hotelRoutes');
+const { getDeliveryIntegration, upsertDeliveryIntegration } = require('../controllers/deliverectController');
 const printerRoutes = require('./printerRoutes');
 const tableReceiptRoutes = require('./tableReceiptRoutes');
 
@@ -72,6 +77,16 @@ router.use('/:businessId/messages', supportMessageRoutes);
 router.use('/:businessId/receipts', receiptRoutes);
 router.use('/:businessId/contracts', contractRoutes);
 router.use('/:businessId/inventory', inventoryRoutes);
+router.use('/:businessId/till', tillRoutes);
+router.use('/:businessId/tables-floor', tableManagementRoutes);
+router.use('/:businessId/waitlist', waitlistRoutes);
+router.use('/:businessId/hotel', hotelRoutes);
+router.post('/:businessId/payment-transactions/:txnId/refund', protect, enforceTenant, require('../controllers/hotelPaymentController').refundTransaction);
+router.get('/:businessId/payment-reconciliation', protect, enforceTenant, require('../controllers/hotelPaymentController').getReconciliation);
+router.get('/:businessId/external-hotel-systems', protect, enforceTenant, require('../controllers/externalHotelSystemsController').listExternalIntegrations);
+router.put('/:businessId/external-hotel-systems/:provider', protect, enforceTenant, require('../controllers/externalHotelSystemsController').connectExternalIntegration);
+router.get('/:businessId/delivery-integration', protect, enforceTenant, getDeliveryIntegration);
+router.put('/:businessId/delivery-integration', protect, enforceTenant, upsertDeliveryIntegration);
 router.use('/:businessId/printer-integration', printerRoutes);
 router.use('/:businessId/tables', tableReceiptRoutes);
 

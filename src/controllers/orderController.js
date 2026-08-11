@@ -282,6 +282,189 @@ const placeStaffOrder = asyncHandler(async (req, res) => {
   res.status(201).json({ order, items: orderItemRows });
 });
 
+// @route POST /api/businesses/:businessId/pos/orders
+// Body: { tableLabel, items, note, paymentMethod }
+// A genuine walk-in/phone/takeaway order - no NFC tap, no existing card
+// at all. This is the actual POS terminal entry point: staff builds the
+// cart and charges it right there, same real-time transaction a
+// physical till handles. Unlike a tap-placed order (which starts
+// unpaid and gets settled later), a POS order is paid the moment it's
+// created - the staff member is standing at the counter collecting the
+// money in the same motion as ringing it up.
+const createPosOrder = asyncHandler(async (req, res) => {
+  const { tableLabel = 'Walk-in', items, note = '', paymentMethod, chargeToFolioId } = req.body;
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ message: 'At least one item is required' });
+  }
+  // "Charge to room" is its own payment method in spirit - it settles
+  // the order immediately the same way cash/card do, just against a
+  // hotel folio instead of a till or a card terminal.
+  if (!chargeToFolioId && !['cash', 'card', 'card_online', 'other'].includes(paymentMethod)) {
+    return res.status(400).json({ message: 'paymentMethod must be cash, card, card_online, or other' });
+  }
+  if (chargeToFolioId) {
+    const { data: folio } = await req.supabase.from('hotel_folios').select('status').eq('id', chargeToFolioId).eq('business_id', req.params.businessId).single();
+    if (!folio) return res.status(404).json({ message: 'Folio not found' });
+    if (folio.status === 'closed') return res.status(400).json({ message: 'This folio is closed - cannot charge to it' });
+  }
+
+  const { data: business } = await req.supabase.from('businesses').select('features').eq('id', req.params.businessId).single();
+
+  const menuItemIds = items.map((i) => i.menuItemId);
+  const { data: menuItems } = await req.supabase
+    .from('menu_items')
+    .select('id, name, price')
+    .in('id', menuItemIds)
+    .eq('business_id', req.params.businessId)
+    .eq('is_available', true);
+  if (!menuItems || menuItems.length !== menuItemIds.length) {
+    return res.status(400).json({ message: 'One or more items are no longer available' });
+  }
+  const menuItemsById = Object.fromEntries(menuItems.map((m) => [m.id, m]));
+
+  const allAddonIds = items.flatMap((i) => i.addonIds || []);
+  let addonsById = {};
+  if (allAddonIds.length > 0) {
+    const { data: addons } = await req.supabase.from('menu_item_addons').select('id, name, price').in('id', allAddonIds);
+    addonsById = Object.fromEntries((addons || []).map((a) => [a.id, a]));
+  }
+
+  const orderItemRows = items.map((i) => {
+    const menuItem = menuItemsById[i.menuItemId];
+    const selectedAddons = (i.addonIds || []).map((id) => addonsById[id]).filter(Boolean);
+    const addonTotal = selectedAddons.reduce((sum, a) => sum + Number(a.price), 0);
+    return {
+      menu_item_id: menuItem.id,
+      item_name: menuItem.name,
+      unit_price: menuItem.price,
+      quantity: Math.max(1, Number(i.quantity) || 1),
+      note: i.note || '',
+      addons: selectedAddons.map((a) => ({ name: a.name, price: a.price })),
+      addon_total: addonTotal,
+      // card_online stays unpaid until the gateway actually confirms it
+      // via confirmPosCardPayment - every other method settles at the
+      // counter in the same motion as ringing it up, so it's paid
+      // immediately, same as before.
+      paid: paymentMethod !== 'card_online',
+      paid_at: paymentMethod !== 'card_online' ? new Date().toISOString() : null,
+    };
+  });
+  const total = orderItemRows.reduce((sum, i) => sum + (i.unit_price + i.addon_total) * i.quantity, 0);
+
+  // Same inventory check every other order path already has - a POS
+  // terminal is not exempt from "can the kitchen actually make this".
+  if (business?.features?.inventory?.enabled) {
+    const { checkStockAvailability } = require('../utils/inventoryStock');
+    const stockCheck = await checkStockAvailability({ orderItemRows });
+    if (!stockCheck.ok && business.features.inventory.blockOrdersOnLowStock !== false) {
+      return res.status(400).json({ message: stockCheck.message });
+    }
+  }
+
+  // Cash orders get tied to the staff member's currently open till, so
+  // it counts toward their reconciliation at close-out. Card/other
+  // payments (an external card machine, etc) never touch the till at
+  // all - only cash needs physical reconciliation.
+  let tillSessionId = null;
+  if (paymentMethod === 'cash') {
+    const { data: till } = await req.supabase
+      .from('till_sessions')
+      .select('id')
+      .eq('staff_id', req.user.id)
+      .eq('status', 'open')
+      .maybeSingle();
+    if (!till) return res.status(400).json({ message: 'Open a till before taking a cash order' });
+    tillSessionId = till.id;
+  }
+
+  const { data: order, error: orderError } = await req.supabase
+    .from('orders')
+    .insert({
+      business_id: req.params.businessId,
+      card_id: null,
+      table_label: tableLabel,
+      note,
+      total,
+      status: 'pending',
+      source: 'staff_pos',
+      payment_method: chargeToFolioId ? 'other' : paymentMethod,
+      till_session_id: tillSessionId,
+      placed_by: req.user.id,
+      charged_to_folio_id: chargeToFolioId || null,
+    })
+    .select()
+    .single();
+  if (orderError) return res.status(400).json({ message: orderError.message });
+
+  if (chargeToFolioId) {
+    await req.supabase.from('hotel_folio_charges').insert({
+      folio_id: chargeToFolioId,
+      description: `${tableLabel} - F&B order (${items.length} item${items.length === 1 ? '' : 's'})`,
+      amount_aed: total,
+      charge_type: 'fnb',
+      source_order_id: order.id,
+    });
+  }
+
+  const { data: insertedItems, error: itemsError } = await req.supabase
+    .from('order_items')
+    .insert(orderItemRows.map((i) => ({ ...i, order_id: order.id })))
+    .select();
+  if (itemsError) return res.status(400).json({ message: itemsError.message });
+
+  // card_online: generate a real gateway session and stop here - stock
+  // deduction and POS push wait for genuine confirmation, same
+  // never-trust-the-redirect-alone rule as every other online payment
+  // in this codebase.
+  if (paymentMethod === 'card_online') {
+    const { supabaseAdmin: sa } = require('../config/supabaseClient');
+    const { data: config } = await sa.from('pos_integrations').select('config').eq('business_id', req.params.businessId).eq('purpose', 'payment').eq('enabled', true).maybeSingle();
+    const provider = config?.config?.provider;
+    const adapter = provider === 'telr' ? require('../utils/telrAdapter') : provider === 'ngenius' ? require('../utils/ngeniusAdapter') : provider === 'ziina' ? require('../utils/ziinaBillAdapter') : null;
+    if (!config || !adapter) {
+      await req.supabase.from('orders').update({ status: 'cancelled' }).eq('id', order.id);
+      return res.status(400).json({ message: 'No online payment provider connected for this business' });
+    }
+
+    const { data: txn } = await sa
+      .from('payment_transactions')
+      .insert({ business_id: req.params.businessId, provider, transaction_type: 'charge', amount_aed: total, context_type: 'pos_order', context_id: order.id })
+      .select()
+      .single();
+
+    const appUrl = process.env.CLIENT_URL || '';
+    const session = await adapter.createPaymentSession(config.config, total, `POS order - ${tableLabel}`, txn.id, `${appUrl}/admin/dashboard/pos?posPaymentTxnId=${txn.id}`);
+    if (!session.success) {
+      await sa.from('payment_transactions').update({ status: 'failed', failure_reason: session.error }).eq('id', txn.id);
+      await req.supabase.from('orders').update({ status: 'cancelled' }).eq('id', order.id);
+      return res.status(400).json({ message: session.error });
+    }
+    await sa.from('payment_transactions').update({ provider_ref: session.providerRef || '' }).eq('id', txn.id);
+    return res.status(201).json({ order, items: insertedItems, redirectUrl: session.redirectUrl, transactionId: txn.id, awaitingPayment: true });
+  }
+
+  if (business?.features?.inventory?.enabled) {
+    const { deductStock } = require('../utils/inventoryStock');
+    deductStock({ businessId: req.params.businessId, orderItemRows: insertedItems, orderId: order.id }).catch(() => {});
+  }
+
+  if (business?.features?.ordering?.posIntegration) {
+    const { data: integration } = await supabaseAdmin
+      .from('pos_integrations')
+      .select('*')
+      .eq('business_id', req.params.businessId)
+      .eq('purpose', 'ordering')
+      .eq('enabled', true)
+      .maybeSingle();
+    if (integration) {
+      const { pushOrderToPos } = require('../utils/posDispatcher');
+      pushOrderToPos(integration.provider, integration.config, order, insertedItems).catch(() => {});
+    }
+  }
+
+  res.status(201).json({ order, items: insertedItems });
+});
+
 // @route POST /api/businesses/:businessId/orders/:orderId/manual-payment
 // Body: { itemIds: string[], method: 'card_machine' | 'cash' }
 // Records money staff collected OUTSIDE Tavzio entirely (the restaurant's
@@ -434,4 +617,44 @@ const listCashPendingItems = asyncHandler(async (req, res) => {
   res.json(items);
 });
 
-module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, listRequests, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady };
+// @route POST /api/businesses/:businessId/orders/pos/confirm-card-payment
+// Body: { transactionId }
+// The staff-side equivalent of confirmFolioPayment - verifies the real
+// gateway outcome, and only now does everything that was deferred at
+// order creation: marking items paid, deducting stock, pushing to POS.
+const confirmPosCardPayment = asyncHandler(async (req, res) => {
+  const { transactionId } = req.body;
+  if (!transactionId) return res.status(400).json({ message: 'transactionId is required' });
+
+  const { data: txn } = await req.supabase.from('payment_transactions').select('*').eq('id', transactionId).eq('business_id', req.params.businessId).single();
+  if (!txn) return res.status(404).json({ message: 'Transaction not found' });
+  if (txn.status === 'completed') return res.json({ status: 'completed' });
+  if (txn.status === 'failed') return res.status(402).json({ message: txn.failure_reason || 'Payment failed', status: 'failed' });
+
+  const { data: config } = await req.supabase.from('pos_integrations').select('config').eq('business_id', req.params.businessId).eq('purpose', 'payment').eq('enabled', true).maybeSingle();
+  const adapter = txn.provider === 'telr' ? require('../utils/telrAdapter') : txn.provider === 'ngenius' ? require('../utils/ngeniusAdapter') : txn.provider === 'ziina' ? require('../utils/ziinaBillAdapter') : null;
+  const result = adapter ? await adapter.checkPaymentStatus(config?.config, txn.provider_ref) : { success: false, error: 'No adapter for this provider' };
+
+  if (!result.success || !result.paid) {
+    await req.supabase.from('payment_transactions').update({ status: 'failed', failure_reason: result.error || 'Not confirmed as paid' }).eq('id', txn.id);
+    return res.status(402).json({ message: result.error || 'Payment not confirmed', status: 'failed' });
+  }
+
+  await req.supabase.from('payment_transactions').update({ status: 'completed', confirmed_at: new Date().toISOString() }).eq('id', txn.id);
+
+  const { data: order } = await req.supabase.from('orders').select('*, order_items(*)').eq('id', txn.context_id).single();
+  if (!order) return res.status(404).json({ message: 'Order not found' });
+
+  await req.supabase.from('order_items').update({ paid: true, paid_at: new Date().toISOString() }).eq('order_id', order.id);
+  await req.supabase.from('orders').update({ payment_transaction_id: txn.id }).eq('id', order.id);
+
+  const { data: business } = await req.supabase.from('businesses').select('features').eq('id', req.params.businessId).single();
+  if (business?.features?.inventory?.enabled) {
+    const { deductStock } = require('../utils/inventoryStock');
+    deductStock({ businessId: req.params.businessId, orderItemRows: order.order_items, orderId: order.id }).catch(() => {});
+  }
+
+  res.json({ status: 'completed', order });
+});
+
+module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, confirmPosCardPayment, listRequests, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady };

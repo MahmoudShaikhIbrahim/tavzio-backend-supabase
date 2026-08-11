@@ -1,6 +1,6 @@
 const express = require('express');
 const {
-  listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, listRequests, dismissRequest,
+  listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, confirmPosCardPayment, listRequests, dismissRequest,
   recordManualPayment, listCashPendingItems, ackOrderReady,
 } = require('../controllers/orderController');
 const { exportOrders } = require('../controllers/exportController');
@@ -13,6 +13,8 @@ router.use(protect, enforceTenant);
 router.get('/export', exportOrders); // must come before /:orderId
 router.post('/clear-table', clearTable);
 router.post('/staff-place', placeStaffOrder);
+router.post('/pos', createPosOrder);
+router.post('/pos/confirm-card-payment', confirmPosCardPayment);
 router.get('/requests', listRequests);
 router.get('/cash-pending', listCashPendingItems);
 router.patch('/requests/:requestId/dismiss', dismissRequest);

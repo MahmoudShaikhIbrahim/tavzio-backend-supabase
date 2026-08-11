@@ -51,20 +51,21 @@ const refundPayment = asyncHandler(async (req, res) => {
     .maybeSingle();
   if (!integration) return res.status(404).json({ message: 'Payment integration not configured' });
 
-  // Telr alone stays dashboard-only: their refund endpoint returns an
-  // unstructured non-JSON response whose format couldn't be verified,
-  // and their transaction-management API needs separate enablement on
-  // the merchant account - real-money code doesn't get written against
-  // an unverified response format. Tap and N-Genius refunds are both
-  // built on their verified APIs.
-  if (paymentProvider === 'telr') {
-    return res.status(400).json({
-      message: "Refunds for Telr payments are done in Telr's own dashboard, not from here",
-    });
-  }
-
+  // Telr's refund/void goes through a genuinely different endpoint
+  // (remote.html, not order.json) with a URL-encoded response format
+  // rather than JSON - this was previously left dashboard-only because
+  // that format hadn't been verified. It now has (see telrAdapter.js),
+  // against real, current integration examples showing the exact
+  // request/response shape. One caveat that remains genuinely
+  // unverifiable from documentation alone: Telr's transaction-management
+  // API may need separate enablement on the specific merchant account,
+  // which would surface as a real error from the call below rather than
+  // a silent failure.
   let result;
-  if (paymentProvider === 'ngenius') {
+  if (paymentProvider === 'telr') {
+    const { createRefund } = require('../utils/telrAdapter');
+    result = await createRefund(integration.config, payment.telr_tran_ref || payment.provider_ref, refundAmount);
+  } else if (paymentProvider === 'ngenius') {
     const { createRefund } = require('../utils/ngeniusAdapter');
     result = await createRefund(integration.config, payment.provider_ref, refundAmount);
   } else if (paymentProvider === 'ziina') {

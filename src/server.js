@@ -15,6 +15,7 @@ const ziinaRoutes = require('./routes/ziinaRoutes');
 const publicContractRoutes = require('./routes/publicContractRoutes');
 const stripeRoutes = require('./routes/stripeRoutes');
 const leadRoutes = require('./routes/leadRoutes');
+const deliverectRoutes = require('./routes/deliverectRoutes');
 
 const app = express();
 
@@ -52,6 +53,7 @@ app.use('/api/ziina', apiLimiter, ziinaRoutes);
 app.use('/api/public/contracts', publicLimiter, publicContractRoutes);
 app.use('/api/stripe', stripeRoutes);
 app.use('/api/leads', apiLimiter, leadRoutes);
+app.use('/api/deliverect', deliverectRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

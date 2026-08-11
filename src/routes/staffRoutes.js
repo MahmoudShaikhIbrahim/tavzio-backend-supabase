@@ -1,5 +1,5 @@
 const express = require('express');
-const { inviteStaff, listStaff, setStaffActive } = require('../controllers/staffController');
+const { inviteStaff, listStaff, setStaffActive, setStaffJobRole, listRolePermissions } = require('../controllers/staffController');
 const { issueAdminCard } = require('../controllers/cardController');
 const { protect, authorize, enforceTenant } = require('../middleware/auth');
 
@@ -12,6 +12,8 @@ router.use(protect, enforceTenant);
 router.post('/', authorize('business_owner', 'super_admin'), inviteStaff);
 router.get('/', listStaff);
 router.patch('/:userId', authorize('business_owner', 'super_admin'), setStaffActive);
+router.patch('/:userId/job-role', authorize('business_owner', 'super_admin'), setStaffJobRole);
+router.get('/role-permissions', listRolePermissions);
 // Only you issue/reissue admin cards — matches how the physical NFC chips
 // actually get programmed (in person, by the platform operator). Either the
 // owner or a staff member can DISABLE any card the moment they notice one's
