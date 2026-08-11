@@ -1,6 +1,8 @@
 const { supabaseAdmin } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 const { revokeSessionsFor } = require('../utils/revokeSessions');
+const { logAction } = require('../utils/auditLog');
+const crypto = require('crypto');
 
 // @route POST /api/businesses/:businessId/staff
 // Creates a staff account (Supabase Auth user + profile row via the
@@ -94,4 +96,40 @@ const setStaffActive = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
-module.exports = { inviteStaff, listStaff, setStaffActive, setStaffJobRole, listRolePermissions };
+// @route POST /api/businesses/:businessId/staff/:userId/reset-password
+// (super_admin or business_owner only)
+// The actual fix for "an onboarded owner/staff member is locked out and
+// nobody can get back in" - there was previously no path for this at
+// all. Generates a real new temporary password directly via the
+// Supabase Admin API (the same mechanism used at account creation), and
+// forces them to set their own on next login - closes the "someone
+// else knows my password" loop the same way first-login already does,
+// rather than leaving a reset password in circulation indefinitely.
+const resetPassword = asyncHandler(async (req, res) => {
+  const { data: profile } = await req.supabase
+    .from('profiles')
+    .select('id, name, role')
+    .eq('id', req.params.userId)
+    .eq('business_id', req.params.businessId)
+    .single();
+  if (!profile) return res.status(404).json({ message: 'Account not found' });
+
+  const tempPassword = crypto.randomBytes(9).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 12);
+
+  const { error: authError } = await supabaseAdmin.auth.admin.updateUserById(profile.id, { password: tempPassword });
+  if (authError) return res.status(400).json({ message: authError.message });
+
+  await supabaseAdmin.from('profiles').update({ must_change_password: true }).eq('id', profile.id);
+
+  await logAction({
+    businessId: req.params.businessId,
+    actor: req.user,
+    action: 'password_reset',
+    targetId: profile.id,
+    details: { accountName: profile.name, role: profile.role },
+  });
+
+  res.json({ tempPassword, name: profile.name });
+});
+
+module.exports = { inviteStaff, listStaff, setStaffActive, setStaffJobRole, listRolePermissions, resetPassword };

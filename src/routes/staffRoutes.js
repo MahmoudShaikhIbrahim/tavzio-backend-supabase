@@ -1,5 +1,5 @@
 const express = require('express');
-const { inviteStaff, listStaff, setStaffActive, setStaffJobRole, listRolePermissions } = require('../controllers/staffController');
+const { inviteStaff, listStaff, setStaffActive, setStaffJobRole, listRolePermissions, resetPassword } = require('../controllers/staffController');
 const { issueAdminCard } = require('../controllers/cardController');
 const { protect, authorize, enforceTenant } = require('../middleware/auth');
 
@@ -13,6 +13,13 @@ router.post('/', authorize('business_owner', 'super_admin'), inviteStaff);
 router.get('/', listStaff);
 router.patch('/:userId', authorize('business_owner', 'super_admin'), setStaffActive);
 router.patch('/:userId/job-role', authorize('business_owner', 'super_admin'), setStaffJobRole);
+// The actual fix for "an onboarded account is locked out and nobody can
+// get back in" - generates a real temporary password directly via the
+// Supabase Admin API, forces a fresh one on next login. Owner or
+// super_admin can trigger this for any account in the business
+// (including the owner's own, if truly locked out and unable to reach
+// the normal Change Password flow in Settings).
+router.post('/:userId/reset-password', authorize('business_owner', 'super_admin'), resetPassword);
 router.get('/role-permissions', listRolePermissions);
 // Only you issue/reissue admin cards — matches how the physical NFC chips
 // actually get programmed (in person, by the platform operator). Either the
