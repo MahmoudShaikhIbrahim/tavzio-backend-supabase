@@ -21,7 +21,7 @@ const protect = asyncHandler(async (req, res, next) => {
 
   const { data: profile, error: profileError } = await supabaseAdmin
     .from('profiles')
-    .select('id, name, role, business_id, is_active, theme_preference, must_change_password, job_role')
+    .select('id, name, role, business_id, is_active, theme_preference, must_change_password, job_role, assigned_sections')
     .eq('id', data.user.id)
     .single();
 

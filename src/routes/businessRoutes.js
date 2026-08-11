@@ -40,6 +40,10 @@ const router = express.Router();
 
 router.get('/', protect, authorize('super_admin'), listBusinesses);
 
+// Platform-wide audit report - must be registered before the /:businessId
+// wildcard below, or "audit-report" would be swallowed as a businessId.
+router.get('/audit-report/pdf', protect, authorize('super_admin'), require('../controllers/auditReportController').generatePlatformAuditReport);
+
 // Platform-wide (not tied to any one business) - the currently-active
 // stamp/signature/legal name new receipts will use going forward.
 router.get('/receipt-branding', protect, authorize('super_admin'), getReceiptBranding);
@@ -85,8 +89,10 @@ router.post('/:businessId/payment-transactions/:txnId/refund', protect, enforceT
 router.get('/:businessId/payment-reconciliation', protect, enforceTenant, require('../controllers/hotelPaymentController').getReconciliation);
 router.get('/:businessId/external-hotel-systems', protect, enforceTenant, require('../controllers/externalHotelSystemsController').listExternalIntegrations);
 router.put('/:businessId/external-hotel-systems/:provider', protect, enforceTenant, require('../controllers/externalHotelSystemsController').connectExternalIntegration);
+router.delete('/:businessId/external-hotel-systems/:provider', protect, enforceTenant, require('../controllers/externalHotelSystemsController').disconnectExternalIntegration);
 router.get('/:businessId/delivery-integration', protect, enforceTenant, getDeliveryIntegration);
 router.put('/:businessId/delivery-integration', protect, enforceTenant, upsertDeliveryIntegration);
+router.get('/:businessId/audit-report/pdf', protect, enforceTenant, require('../controllers/auditReportController').generateBusinessAuditReport);
 router.use('/:businessId/printer-integration', printerRoutes);
 router.use('/:businessId/tables', tableReceiptRoutes);
 

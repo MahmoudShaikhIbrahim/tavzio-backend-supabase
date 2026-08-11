@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const PDFDocument = require('pdfkit');
 const { supabaseAdmin } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 const { logAction } = require('../utils/auditLog');
@@ -284,8 +285,110 @@ const signContract = asyncHandler(async (req, res) => {
   res.json(updated);
 });
 
+// @route GET /api/businesses/:businessId/contracts/:contractId/pdf
+// Real downloadable, professional PDF - not just text in the browser.
+// Reuses the same stamp/signature/legal-name branding row the receipts
+// system already maintains (set once in Billing Settings, applied
+// everywhere), so both documents carry identical, consistent branding.
+// For a signed contract, the typed name + timestamp + IP captured at
+// signing renders as the e-signature block - the DocuSign-style proof
+// of consent, permanently part of this specific document.
+const downloadContractPdf = asyncHandler(async (req, res) => {
+  const { data: contract } = await req.supabase.from('contracts').select('*').eq('id', req.params.contractId).eq('business_id', req.params.businessId).single();
+  if (!contract) return res.status(404).json({ message: 'Contract not found' });
+
+  const { data: business } = await req.supabase.from('businesses').select('name, trn').eq('id', req.params.businessId).single();
+  const { data: branding } = await req.supabase.from('receipt_branding').select('*').limit(1).maybeSingle();
+
+  const isSigned = contract.status === 'signed' || contract.status === 'active';
+  const text = isSigned && contract.signed_snapshot_text ? contract.signed_snapshot_text : buildContractText(contract, business);
+  const legalName = branding?.legal_name || 'Tavzio';
+  const brass = '#b8925a';
+  const ink = '#20170f';
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="${contract.contract_number}.pdf"`);
+
+  const doc = new PDFDocument({ size: 'A4', margin: 56, bufferPages: true });
+  doc.pipe(res);
+
+  // Header - identical branding language to receipts
+  doc.fontSize(22).fillColor(ink).font('Helvetica-Bold').text(legalName, { align: 'left' });
+  if (branding?.issuer_trn) {
+    doc.fontSize(9).fillColor('#666').font('Helvetica').text(`TRN: ${branding.issuer_trn}`, { align: 'left' });
+  }
+  doc.moveDown(1);
+  doc.fontSize(16).fillColor(ink).font('Helvetica-Bold').text('SERVICE AGREEMENT', { align: 'right' });
+  doc.fontSize(10).fillColor('#666').font('Helvetica').text(`No. ${contract.contract_number}`, { align: 'right' });
+  doc.moveDown(0.8);
+  doc.moveTo(56, doc.y).lineTo(539, doc.y).strokeColor(brass).lineWidth(1).stroke();
+  doc.moveDown(1);
+
+  // Body - the full agreement text, paginating naturally with PDFKit's
+  // own flow rather than manual page-break math.
+  doc.fontSize(10).fillColor('#222').font('Helvetica').text(text, { width: 483, align: 'left', lineGap: 3 });
+
+  // E-signature block - only for a contract that's actually been signed.
+  // This is the part that makes it a real, provable signature: not just
+  // "Signed" but who, exactly when, and from where.
+  if (isSigned) {
+    doc.moveDown(2);
+    doc.moveTo(56, doc.y).lineTo(539, doc.y).strokeColor('#ccc').lineWidth(0.5).stroke();
+    doc.moveDown(0.8);
+    doc.fontSize(11).fillColor(ink).font('Helvetica-Bold').text('Electronically signed');
+    doc.fontSize(10).fillColor('#333').font('Helvetica')
+      .text(`Signed by: ${contract.signed_by_name}`)
+      .text(`Date: ${new Date(contract.signed_at).toLocaleString('en-GB', { dateStyle: 'long', timeStyle: 'short' })}`)
+      .text(`IP address: ${contract.signed_ip || 'not recorded'}`);
+    doc.fontSize(8.5).fillColor('#888').font('Helvetica').text(
+      'This is a valid electronic signature under UAE Federal Decree-Law No. 46 of 2021 on Electronic Transactions and Trust Services. ' +
+      'The signer\'s typed name, the exact agreement text above, the timestamp, and the originating IP address were captured together at the moment of signing.',
+      { width: 483 }
+    );
+  }
+
+  // Stamp and signature images - fixed near the bottom of the current
+  // page, same placement convention as receipts.
+  const stampY = Math.min(doc.y + 30, 700);
+  if (branding?.signature_url) {
+    try {
+      const sigRes = await fetch(branding.signature_url);
+      const sigBuffer = Buffer.from(await sigRes.arrayBuffer());
+      doc.image(sigBuffer, 340, stampY, { width: 140 });
+      doc.moveTo(340, stampY + 46).lineTo(480, stampY + 46).strokeColor('#999').lineWidth(0.5).stroke();
+      doc.fontSize(9).fillColor('#666').text('Authorized signature (Tavzio)', 340, stampY + 50);
+    } catch {
+      // A broken signature URL should never break the whole PDF.
+    }
+  }
+  if (branding?.stamp_url) {
+    try {
+      const stampRes = await fetch(branding.stamp_url);
+      const stampBuffer = Buffer.from(await stampRes.arrayBuffer());
+      doc.image(stampBuffer, 56, stampY - 10, { width: 110 });
+    } catch {
+      // Same resilience as the signature above.
+    }
+  }
+
+  doc.end();
+});
+
+// @route GET /api/public/contracts/:token/pdf
+// Same no-login rule as the rest of this file - the client needs to be
+// able to download their own signed copy from the emailed link without
+// ever having to create an account.
+const downloadPublicContractPdf = asyncHandler(async (req, res) => {
+  const { data: contract } = await supabaseAdmin.from('contracts').select('*').eq('sign_token', req.params.token).maybeSingle();
+  if (!contract) return res.status(404).json({ message: 'This link is invalid or has expired' });
+  req.params.contractId = contract.id;
+  req.params.businessId = contract.business_id;
+  req.supabase = supabaseAdmin; // no authenticated RLS session on the public route - service role, scoped manually above
+  return downloadContractPdf(req, res);
+});
+
 module.exports = {
-  createContract, sendContract, listContracts, previewContract, signContract,
+  createContract, sendContract, listContracts, previewContract, signContract, downloadContractPdf, downloadPublicContractPdf,
   getPublicContractByToken, signPublicContract,
   buildContractText, periodsPerYear,
 };

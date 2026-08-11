@@ -1,5 +1,5 @@
 const express = require('express');
-const { inviteStaff, listStaff, setStaffActive, setStaffJobRole, listRolePermissions, resetPassword } = require('../controllers/staffController');
+const { inviteStaff, listStaff, setStaffActive, setStaffJobRole, setStaffSections, listRolePermissions, resetPassword } = require('../controllers/staffController');
 const { issueAdminCard } = require('../controllers/cardController');
 const { protect, authorize, enforceTenant } = require('../middleware/auth');
 
@@ -13,6 +13,10 @@ router.post('/', authorize('business_owner', 'super_admin'), inviteStaff);
 router.get('/', listStaff);
 router.patch('/:userId', authorize('business_owner', 'super_admin'), setStaffActive);
 router.patch('/:userId/job-role', authorize('business_owner', 'super_admin'), setStaffJobRole);
+// Which dashboard sections this staff account is allowed to see - the
+// same "owner/super_admin manage, staff never touch their own" pattern
+// as everything else in this file.
+router.patch('/:userId/sections', authorize('business_owner', 'super_admin'), setStaffSections);
 // The actual fix for "an onboarded account is locked out and nobody can
 // get back in" - generates a real temporary password directly via the
 // Supabase Admin API, forces a fresh one on next login. Owner or

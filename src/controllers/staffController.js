@@ -37,7 +37,7 @@ const inviteStaff = asyncHandler(async (req, res) => {
 const listStaff = asyncHandler(async (req, res) => {
   const { data, error } = await req.supabase
     .from('profiles')
-    .select('id, name, role, job_role, is_active, last_login_at, created_at')
+    .select('id, name, role, job_role, is_active, last_login_at, created_at, assigned_sections')
     .eq('business_id', req.params.businessId)
     .in('role', ['staff', 'business_owner']);
 
@@ -132,4 +132,29 @@ const resetPassword = asyncHandler(async (req, res) => {
   res.json({ tempPassword, name: profile.name });
 });
 
-module.exports = { inviteStaff, listStaff, setStaffActive, setStaffJobRole, listRolePermissions, resetPassword };
+// @route PATCH /api/businesses/:businessId/staff/:userId/sections
+// Body: { sections: string[] | null }
+// Restricts (or, with null, un-restricts) which dashboard sections this
+// staff account can see - a real account-level setting checked by the
+// frontend nav on every load, not a one-time UI hint. Multiple people
+// can still be logged into the same account at once from different
+// devices exactly as before; this only shapes what that account sees,
+// same for everyone using it.
+const setStaffSections = asyncHandler(async (req, res) => {
+  const { sections } = req.body;
+  if (sections !== null && !Array.isArray(sections)) {
+    return res.status(400).json({ message: 'sections must be an array or null' });
+  }
+  const { data, error } = await req.supabase
+    .from('profiles')
+    .update({ assigned_sections: sections })
+    .eq('id', req.params.userId)
+    .eq('business_id', req.params.businessId)
+    .eq('role', 'staff')
+    .select('id, name, assigned_sections')
+    .single();
+  if (error || !data) return res.status(404).json({ message: 'Staff member not found' });
+  res.json(data);
+});
+
+module.exports = { inviteStaff, listStaff, setStaffActive, setStaffJobRole, setStaffSections, listRolePermissions, resetPassword };

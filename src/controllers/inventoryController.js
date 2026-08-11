@@ -56,6 +56,42 @@ const updateIngredient = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
+// Deleting cascades to its recipe links and stock-movement history (see
+// migration 0030's `on delete cascade` on ingredient_id) - so this is
+// only for ingredients that were never actually used. If it's linked to
+// a menu item's recipe or has real stock history, block it and point the
+// owner at archiving via a zero threshold instead of silently wiping
+// movement records an FTA audit might need later.
+const deleteIngredient = asyncHandler(async (req, res) => {
+  const { ingredientId, businessId } = req.params;
+
+  const { count: recipeCount } = await req.supabase
+    .from('menu_item_ingredients')
+    .select('id', { count: 'exact', head: true })
+    .eq('ingredient_id', ingredientId);
+  const { count: movementCount } = await req.supabase
+    .from('stock_movements')
+    .select('id', { count: 'exact', head: true })
+    .eq('ingredient_id', ingredientId);
+
+  if (recipeCount || movementCount) {
+    return res.status(400).json({
+      message: recipeCount
+        ? 'This ingredient is used in one or more recipes - remove it from those recipes first.'
+        : 'This ingredient has stock history and can\'t be deleted (needed for your records). Set its stock to 0 instead.',
+    });
+  }
+
+  const { error, count } = await req.supabase
+    .from('ingredients')
+    .delete({ count: 'exact' })
+    .eq('id', ingredientId)
+    .eq('business_id', businessId);
+  if (error) return res.status(400).json({ message: error.message });
+  if (!count) return res.status(404).json({ message: 'Ingredient not found' });
+  res.json({ message: 'Ingredient deleted' });
+});
+
 // Manual stock adjustment - waste, recount, correction. Always goes
 // through stock_movements so there's a real explanation on record, never
 // a silent overwrite of the stock number.
@@ -201,7 +237,7 @@ const receivePurchaseOrder = asyncHandler(async (req, res) => {
 
 module.exports = {
   listSuppliers, createSupplier,
-  listIngredients, createIngredient, updateIngredient, adjustStock,
+  listIngredients, createIngredient, updateIngredient, deleteIngredient, adjustStock,
   getRecipe, setRecipe,
   listPurchaseOrders, createPurchaseOrder, receivePurchaseOrder,
 };

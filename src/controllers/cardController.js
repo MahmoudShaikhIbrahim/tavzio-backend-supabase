@@ -33,13 +33,19 @@ const listCards = asyncHandler(async (req, res) => {
 
 // @route PATCH /api/businesses/:businessId/cards/:cardId
 const updateCard = asyncHandler(async (req, res) => {
-  const { label, status } = req.body;
+  const { label, status, roomId } = req.body;
   const update = {};
   if (label !== undefined) update.label = label;
   if (status !== undefined) {
     update.status = status;
     update.last_programmed_at = new Date().toISOString();
   }
+  // Links (or, with null, unlinks) this physical stand to a hotel room -
+  // this is what makes a tap on that stand route to the guest portal for
+  // that specific room instead of the normal landing page (see
+  // resolveCardTap). roomId === undefined means "not part of this
+  // update" (leave as-is); roomId === null is an explicit unlink.
+  if (roomId !== undefined) update.room_id = roomId;
 
   const { data, error } = await req.supabase
     .from('cards')

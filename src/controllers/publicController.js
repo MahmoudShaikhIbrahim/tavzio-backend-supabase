@@ -57,7 +57,7 @@ async function issueSessionFor(userId) {
 const resolveCardTap = asyncHandler(async (req, res) => {
   const { data: card, error: cardError } = await supabaseAdmin
     .from('cards')
-    .select('id, status, linked_user_id, business_id, room_id, businesses(slug, status, name, features, category)')
+    .select('id, status, linked_user_id, business_id, room_id, merged_with_card_id, businesses(slug, status, name, features, category)')
     .eq('uid', req.params.cardUid)
     .single();
 
@@ -155,11 +155,19 @@ const resolveCardTap = asyncHandler(async (req, res) => {
   // carries it to the landing page and passes it to the loyalty check-in
   // endpoint, which is how we prove a check-in followed a real tap rather
   // than someone reloading the public URL from home.
+  //
+  // A merged secondary stand logs its tap event against the PRIMARY
+  // card's id instead of its own - this is the one place that matters:
+  // every order, bill, and table-status action downstream reads
+  // tapEvent.card_id, so resolving it here means a bigger party spanning
+  // two physical stands genuinely operates and counts as one table from
+  // this point on, not just a cosmetic link on the floor plan.
+  const effectiveCardId = card.merged_with_card_id || card.id;
   const { data: event, error: eventError } = await supabaseAdmin
     .from('events')
     .insert({
       business_id: card.business_id,
-      card_id: card.id,
+      card_id: effectiveCardId,
       type: 'nfc_tap',
       ...eventContext(req),
     })

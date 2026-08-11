@@ -1,7 +1,7 @@
 const express = require('express');
 const {
   listSuppliers, createSupplier,
-  listIngredients, createIngredient, updateIngredient, adjustStock,
+  listIngredients, createIngredient, updateIngredient, deleteIngredient, adjustStock,
   getRecipe, setRecipe,
   listPurchaseOrders, createPurchaseOrder, receivePurchaseOrder,
 } = require('../controllers/inventoryController');
@@ -17,6 +17,7 @@ router.post('/suppliers', createSupplier);
 router.get('/ingredients', listIngredients);
 router.post('/ingredients', createIngredient);
 router.patch('/ingredients/:ingredientId', updateIngredient);
+router.delete('/ingredients/:ingredientId', deleteIngredient);
 router.post('/ingredients/:ingredientId/adjust', adjustStock);
 
 router.get('/menu-items/:menuItemId/recipe', getRecipe);

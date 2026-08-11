@@ -179,7 +179,44 @@ const transferCharge = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
+// @route GET /api/businesses/:businessId/hotel/folios/lookup?roomNumber=814
+// Room-number search for the POS "Charge to Room" flow - a waiter/staff
+// member typing in a room number, not browsing a reservation list. Only
+// ever returns a currently checked-in room's open primary folio, since
+// that's the only thing a POS charge could legitimately land on.
+const lookupFolioByRoom = asyncHandler(async (req, res) => {
+  const roomNumber = String(req.query.roomNumber || '').trim();
+  if (!roomNumber) return res.status(400).json({ message: 'roomNumber is required' });
+
+  const { data: room } = await req.supabase
+    .from('hotel_rooms')
+    .select('id, room_number')
+    .eq('business_id', req.params.businessId)
+    .eq('room_number', roomNumber)
+    .maybeSingle();
+  if (!room) return res.status(404).json({ message: 'No room found with that number' });
+
+  const { data: reservation } = await req.supabase
+    .from('hotel_reservations')
+    .select('id, hotel_guests(name)')
+    .eq('room_id', room.id)
+    .eq('status', 'checked_in')
+    .maybeSingle();
+  if (!reservation) return res.status(404).json({ message: 'That room has no checked-in guest right now' });
+
+  const { data: folio } = await req.supabase
+    .from('hotel_folios')
+    .select('id')
+    .eq('reservation_id', reservation.id)
+    .eq('is_primary', true)
+    .eq('status', 'open')
+    .maybeSingle();
+  if (!folio) return res.status(404).json({ message: 'No open folio for this room' });
+
+  res.json({ folioId: folio.id, roomNumber: room.room_number, guestName: reservation.hotel_guests?.name || '' });
+});
+
 module.exports = {
   getFolio, getFoliosByReservation, addCharge, recordPayment,
-  recordDeposit, recordRefund, recordAdjustment, splitFolio, transferCharge,
+  recordDeposit, recordRefund, recordAdjustment, splitFolio, transferCharge, lookupFolioByRoom,
 };

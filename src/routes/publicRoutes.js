@@ -1,6 +1,7 @@
 const express = require('express');
 const { submitLead } = require('../controllers/leadController');
-const { getGuestPortal, submitGuestRequest } = require('../controllers/hotelGuestPortalController');
+const { getGuestPortal, submitGuestRequest, submitGuestOrder, getMyRequests } = require('../controllers/hotelGuestPortalController');
+const { listPublicOutlets } = require('../controllers/hotelOutletsController');
 const { createFolioPaymentSession, confirmFolioPayment } = require('../controllers/hotelPaymentController');
 const {
   resolveCardTap,
@@ -51,7 +52,10 @@ router.post('/business/:slug/bill/confirm', confirmPaySession);
 router.post('/leads', submitLead);
 
 router.get('/hotel/:slug/room/:roomId', getGuestPortal);
+router.get('/hotel/:slug/room/:roomId/outlets', listPublicOutlets);
 router.post('/hotel/:slug/room/:roomId/requests', submitGuestRequest);
+router.post('/hotel/:slug/room/:roomId/orders', submitGuestOrder);
+router.get('/hotel/:slug/room/:roomId/my-requests', getMyRequests);
 router.post('/hotel/:slug/room/:roomId/folio/pay', createFolioPaymentSession);
 router.post('/hotel/:slug/room/:roomId/folio/confirm', confirmFolioPayment);
 
