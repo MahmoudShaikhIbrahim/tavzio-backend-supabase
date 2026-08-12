@@ -73,6 +73,21 @@ const generateBusinessAuditReport = asyncHandler(async (req, res) => {
   const branding = await getBranding(req.supabase);
   const legalName = branding?.legal_name || 'Tavzio';
 
+  // The payments-section title used to hardcode "Tap Payments" regardless
+  // of what the business actually configured (or whether they'd
+  // configured anything at all) - it now reflects the real connected
+  // provider, or just "Payments" if none is set up.
+  const { data: paymentIntegration } = await req.supabase
+    .from('pos_integrations')
+    .select('config')
+    .eq('business_id', req.params.businessId)
+    .eq('purpose', 'payment')
+    .maybeSingle();
+  const PROVIDER_LABELS = { tap: 'Tap Payments', telr: 'Telr', ngenius: 'N-Genius Online', ziina: 'Ziina' };
+  const paymentsSectionTitle = paymentIntegration?.config?.provider
+    ? `Customer Payments (Pay Bill / ${PROVIDER_LABELS[paymentIntegration.config.provider] || paymentIntegration.config.provider})`
+    : 'Customer Payments (Pay Bill)';
+
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `inline; filename="${business.name.replace(/\W+/g, '_')}_audit_${year}.pdf"`);
   const doc = new PDFDocument({ size: 'A4', margin: 56, bufferPages: true });
@@ -113,10 +128,10 @@ const generateBusinessAuditReport = asyncHandler(async (req, res) => {
   }
   doc.fontSize(10).font('Helvetica-Bold').fillColor(INK).text(`Subtotal: AED ${receiptsTotal.toFixed(2)}`);
 
-  // Customer payments (restaurant/cafe tap payments)
+  // Customer payments (restaurant/cafe payments, whatever provider this business actually uses)
   const paymentsTotal = (payments || []).reduce((s, r) => s + Number(r.amount) + Number(r.tip_amount || 0), 0);
   if (payments?.length) {
-    drawSectionTitle(doc, 'Customer Payments (Pay Bill / Tap Payments)');
+    drawSectionTitle(doc, paymentsSectionTitle);
     drawTable(doc, payments, [
       { label: 'Date', value: (r) => new Date(r.created_at).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' }), width: 140 },
       { label: 'Amount (AED)', value: (r) => Number(r.amount).toFixed(2), width: 90 },
@@ -140,7 +155,16 @@ const generateBusinessAuditReport = asyncHandler(async (req, res) => {
     doc.fontSize(10).font('Helvetica-Bold').fillColor(INK).text(`Charges: AED ${gatewayTotal.toFixed(2)}  ·  Refunds: AED ${gatewayRefunds.toFixed(2)}`);
   }
 
-  // Grand total
+  // Grand total - reserved as one block, not written blind. Without
+  // this check, if the tables above happened to leave just slightly too
+  // little room, PDFKit would silently start a new page mid-block,
+  // stranding the total line or the disclaimer alone on an otherwise
+  // empty trailing page. ~100pt is comfortably enough for the divider,
+  // total line, and the 3-sentence disclaimer at this font size.
+  const summaryBlockHeight = 100;
+  if (doc.y + summaryBlockHeight > doc.page.height - doc.page.margins.bottom) {
+    doc.addPage();
+  }
   doc.moveDown(1);
   doc.moveTo(56, doc.y).lineTo(539, doc.y).strokeColor(BRASS).lineWidth(1).stroke();
   doc.moveDown(0.4);
@@ -207,6 +231,12 @@ const generatePlatformAuditReport = asyncHandler(async (req, res) => {
     doc.fontSize(10).fillColor('#888').font('Helvetica').text('No billing receipts issued in this period.');
   }
 
+  // Same reserved-block guard as the business report - the total line,
+  // collected-amount line, and disclaimer stay together on one page.
+  const summaryBlockHeight = 120;
+  if (doc.y + summaryBlockHeight > doc.page.height - doc.page.margins.bottom) {
+    doc.addPage();
+  }
   doc.moveDown(1);
   doc.moveTo(56, doc.y).lineTo(539, doc.y).strokeColor(BRASS).lineWidth(1).stroke();
   doc.moveDown(0.4);
