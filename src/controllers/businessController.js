@@ -17,7 +17,7 @@ const getBusiness = asyncHandler(async (req, res) => {
 
 // @route PATCH /api/businesses/:businessId
 const updateBusiness = asyncHandler(async (req, res) => {
-  const { name, logoUrl, coverImageUrl, description, category, theme, links, notificationSettings, orderingPaused, trn } = req.body;
+  const { name, logoUrl, coverImageUrl, description, category, theme, links, notificationSettings, orderingPaused, trn, tourismDirhamRateAed } = req.body;
 
   // Business Type (category) determines which product architecture a
   // business gets (restaurant/F&B POS vs the eventual hotel PMS+F&B
@@ -42,6 +42,11 @@ const updateBusiness = asyncHandler(async (req, res) => {
   if (logoUrl !== undefined) update.logo_url = logoUrl;
   if (coverImageUrl !== undefined) update.cover_image_url = coverImageUrl;
   if (trn !== undefined) update.trn = trn;
+  // Dubai/UAE Tourism Dirham per-room-night fee - hotel-only in
+  // practice, but not gated behind category here since a business could
+  // legitimately be reclassified later without losing a rate they'd
+  // already set.
+  if (tourismDirhamRateAed !== undefined) update.tourism_dirham_rate_aed = Number(tourismDirhamRateAed) || 0;
   if (category !== undefined) update.category = category; // only reachable here if req.user.role === 'super_admin', checked above
   if (description !== undefined) {
     update.description = description;
@@ -155,7 +160,7 @@ const deleteBusiness = asyncHandler(async (req, res) => {
 //     links?: { <linkKey>: { enabled: boolean } }  // only `enabled` is
 //       ever honored here - the URL `value` stays owner-editable via
 //       updateBusiness, never touched by this endpoint.
-const NESTED_FEATURE_KEYS = ['ordering', 'booking', 'accessMethods', 'inventory'];
+const NESTED_FEATURE_KEYS = ['ordering', 'booking', 'accessMethods', 'inventory', 'hr'];
 
 const setBusinessFeatures = asyncHandler(async (req, res) => {
   const { links: linksPatch, ...featuresPatch } = req.body;

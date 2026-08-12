@@ -66,6 +66,8 @@ router.use('/:businessId/cards', cardRoutes);
 router.use('/:businessId/analytics', analyticsRoutes);
 router.use('/:businessId/loyalty', loyaltyRoutes);
 router.use('/:businessId/staff', staffRoutes);
+router.use('/:businessId/staff-shifts', require('./staffShiftRoutes'));
+router.use('/:businessId/hr', require('./hrRoutes'));
 router.use('/:businessId/menu', menuRoutes);
 router.use('/:businessId/menu/ai', menuAiRoutes);
 router.use('/:businessId/orders', orderRoutes);

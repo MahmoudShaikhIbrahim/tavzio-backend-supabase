@@ -292,9 +292,19 @@ const placeStaffOrder = asyncHandler(async (req, res) => {
 // created - the staff member is standing at the counter collecting the
 // money in the same motion as ringing it up.
 const createPosOrder = asyncHandler(async (req, res) => {
-  const { tableLabel = 'Walk-in', items, note = '', paymentMethod, chargeToFolioId } = req.body;
+  const { tableLabel = 'Walk-in', items, note = '', paymentMethod, chargeToFolioId, discountType, discountValue, discountReason } = req.body;
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ message: 'At least one item is required' });
+  }
+  if (discountType && !['percentage', 'fixed'].includes(discountType)) {
+    return res.status(400).json({ message: 'discountType must be percentage or fixed' });
+  }
+  // A discount always needs a reason on record - this is what turns "the
+  // owner comps a regular a free coffee" from an invisible cash-drawer
+  // discrepancy into something accountable and auditable. A 100% comp is
+  // just a percentage discount of 100, so this same mechanism covers both.
+  if (discountType && !discountReason?.trim()) {
+    return res.status(400).json({ message: 'A reason is required when applying a discount or comp' });
   }
   // "Charge to room" is its own payment method in spirit - it settles
   // the order immediately the same way cash/card do, just against a
@@ -333,6 +343,12 @@ const createPosOrder = asyncHandler(async (req, res) => {
     const menuItem = menuItemsById[i.menuItemId];
     const selectedAddons = (i.addonIds || []).map((id) => addonsById[id]).filter(Boolean);
     const addonTotal = selectedAddons.reduce((sum, a) => sum + Number(a.price), 0);
+    // A course left blank fires immediately, exactly like today - this
+    // is purely opt-in. Assigning a course (Starter/Main/Dessert) holds
+    // it back from the kitchen until a server explicitly fires that
+    // course via POST /orders/:orderId/fire-course, the standard
+    // full-service pattern of not sending mains until starters are cleared.
+    const course = (i.course || '').trim();
     return {
       menu_item_id: menuItem.id,
       item_name: menuItem.name,
@@ -347,9 +363,19 @@ const createPosOrder = asyncHandler(async (req, res) => {
       // immediately, same as before.
       paid: paymentMethod !== 'card_online',
       paid_at: paymentMethod !== 'card_online' ? new Date().toISOString() : null,
+      course,
+      course_status: course ? 'held' : 'fired',
+      fired_at: course ? null : new Date().toISOString(),
     };
   });
-  const total = orderItemRows.reduce((sum, i) => sum + (i.unit_price + i.addon_total) * i.quantity, 0);
+  const subtotal = orderItemRows.reduce((sum, i) => sum + (i.unit_price + i.addon_total) * i.quantity, 0);
+  let discountAmount = 0;
+  if (discountType === 'percentage') {
+    discountAmount = Math.round(subtotal * (Math.min(100, Math.max(0, Number(discountValue) || 0)) / 100) * 100) / 100;
+  } else if (discountType === 'fixed') {
+    discountAmount = Math.min(subtotal, Math.max(0, Number(discountValue) || 0));
+  }
+  const total = Math.max(0, subtotal - discountAmount);
 
   // Same inventory check every other order path already has - a POS
   // terminal is not exempt from "can the kitchen actually make this".
@@ -391,6 +417,11 @@ const createPosOrder = asyncHandler(async (req, res) => {
       till_session_id: tillSessionId,
       placed_by: req.user.id,
       charged_to_folio_id: chargeToFolioId || null,
+      discount_type: discountType || null,
+      discount_value: discountType ? Number(discountValue) || 0 : 0,
+      discount_amount_aed: discountAmount,
+      discount_reason: discountType ? discountReason.trim() : '',
+      discounted_by: discountType ? req.user.id : null,
     })
     .select()
     .single();
@@ -657,4 +688,25 @@ const confirmPosCardPayment = asyncHandler(async (req, res) => {
   res.json({ status: 'completed', order });
 });
 
-module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, confirmPosCardPayment, listRequests, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady };
+// @route POST /api/businesses/:businessId/orders/:orderId/fire-course
+// Body: { course }
+// Releases every held item of that course on this order to the kitchen
+// in one motion - the actual server action ("fire the mains") that
+// makes course holding useful instead of just a label.
+const fireCourse = asyncHandler(async (req, res) => {
+  const { course } = req.body;
+  if (!course) return res.status(400).json({ message: 'course is required' });
+
+  const { data, error } = await req.supabase
+    .from('order_items')
+    .update({ course_status: 'fired', fired_at: new Date().toISOString() })
+    .eq('order_id', req.params.orderId)
+    .eq('course', course)
+    .eq('course_status', 'held')
+    .select();
+  if (error) return res.status(400).json({ message: error.message });
+  if (!data || data.length === 0) return res.status(404).json({ message: 'No held items found for that course' });
+  res.json({ message: `Fired ${data.length} item(s)`, items: data });
+});
+
+module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, confirmPosCardPayment, listRequests, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse };

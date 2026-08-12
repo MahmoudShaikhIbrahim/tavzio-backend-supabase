@@ -1,7 +1,7 @@
 const express = require('express');
 const {
   listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, confirmPosCardPayment, listRequests, dismissRequest,
-  recordManualPayment, listCashPendingItems, ackOrderReady,
+  recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse,
 } = require('../controllers/orderController');
 const { exportOrders } = require('../controllers/exportController');
 const { protect, enforceTenant } = require('../middleware/auth');
@@ -25,5 +25,6 @@ router.post('/:orderId/void', voidOrder);
 router.post('/:orderId/items/:itemId/void', voidOrderItem);
 router.post('/:orderId/manual-payment', recordManualPayment);
 router.post('/:orderId/ready-ack', ackOrderReady);
+router.post('/:orderId/fire-course', fireCourse);
 
 module.exports = router;

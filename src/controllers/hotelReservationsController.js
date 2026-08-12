@@ -4,10 +4,11 @@ const { logAction } = require('../utils/auditLog');
 const listReservations = asyncHandler(async (req, res) => {
   let query = req.supabase
     .from('hotel_reservations')
-    .select('*, hotel_guests(name, phone, email), hotel_rooms(room_number, room_type)')
+    .select('*, hotel_guests(name, phone, email), hotel_rooms(room_number, room_type), hotel_booking_groups(id, group_name)')
     .eq('business_id', req.params.businessId)
     .order('check_in_date', { ascending: false });
   if (req.query.status) query = query.eq('status', req.query.status);
+  if (req.query.bookingGroupId) query = query.eq('booking_group_id', req.query.bookingGroupId);
   const { data, error } = await query;
   if (error) return res.status(400).json({ message: error.message });
   res.json(data);
@@ -35,7 +36,7 @@ async function hasOverlap(supabase, businessId, roomId, checkInDate, checkOutDat
 }
 
 const createReservation = asyncHandler(async (req, res) => {
-  const { guestId, roomId = null, checkInDate, checkOutDate, adults = 1, children = 0, source = 'direct', rateAed, ratePlanId = null } = req.body;
+  const { guestId, roomId = null, checkInDate, checkOutDate, adults = 1, children = 0, source = 'direct', rateAed, ratePlanId = null, bookingGroupId = null } = req.body;
   if (!guestId || !checkInDate || !checkOutDate) {
     return res.status(400).json({ message: 'guestId, checkInDate, and checkOutDate are required' });
   }
@@ -62,13 +63,13 @@ const createReservation = asyncHandler(async (req, res) => {
     .insert({
       business_id: req.params.businessId, guest_id: guestId, room_id: roomId,
       check_in_date: checkInDate, check_out_date: checkOutDate, adults, children, source,
-      rate_aed: resolvedRate || 0, rate_plan_id: ratePlanId,
+      rate_aed: resolvedRate || 0, rate_plan_id: ratePlanId, booking_group_id: bookingGroupId,
     })
     .select()
     .single();
   if (error) return res.status(400).json({ message: error.message });
 
-  await logAction({ businessId: req.params.businessId, actor: req.user, action: 'reservation_created', targetId: data.id, details: { checkInDate, checkOutDate, roomId } });
+  await logAction({ businessId: req.params.businessId, actor: req.user, action: 'reservation_created', targetId: data.id, details: { checkInDate, checkOutDate, roomId, bookingGroupId } });
   res.status(201).json(data);
 });
 
@@ -122,6 +123,24 @@ const checkIn = asyncHandler(async (req, res) => {
     charge_type: 'room',
   }));
   await req.supabase.from('hotel_folio_charges').insert(roomCharges);
+
+  // Tourism Dirham - a real Dubai/UAE DTCM-mandated per-room-night fee,
+  // not a generic PMS line item. Only applied if the business has set a
+  // rate (0 = not applicable/not set, e.g. outside Dubai or not yet
+  // configured) - never silently charges a guest a fee the owner never
+  // actually enabled. Tracked as its own charge type so it can be
+  // reported on separately, exactly what a DTCM audit needs to see.
+  const { data: business } = await req.supabase.from('businesses').select('tourism_dirham_rate_aed').eq('id', req.params.businessId).single();
+  if (business?.tourism_dirham_rate_aed > 0) {
+    const tourismDirhamCharges = Array.from({ length: nights }, (_, i) => ({
+      folio_id: folio.id,
+      description: `Tourism Dirham - night ${i + 1}`,
+      amount_aed: business.tourism_dirham_rate_aed,
+      charge_type: 'other',
+      is_tourism_dirham: true,
+    }));
+    await req.supabase.from('hotel_folio_charges').insert(tourismDirhamCharges);
+  }
 
   await logAction({ businessId: req.params.businessId, actor: req.user, action: 'reservation_checked_in', targetId: reservation.id, details: { roomId: finalRoomId, folioId: folio.id, nights } });
   res.json({ reservation: updatedReservation, folio });

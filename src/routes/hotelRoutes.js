@@ -4,13 +4,14 @@ const { listGuests, createGuest, updateGuest } = require('../controllers/hotelGu
 const { listReservations, createReservation, checkIn, checkOut, cancelReservation } = require('../controllers/hotelReservationsController');
 const {
   getFolio, getFoliosByReservation, addCharge, recordPayment,
-  recordDeposit, recordRefund, recordAdjustment, splitFolio, transferCharge, lookupFolioByRoom,
+  recordDeposit, recordRefund, recordAdjustment, splitFolio, transferCharge, lookupFolioByRoom, getTourismDirhamReport,
 } = require('../controllers/hotelFolioController');
 const { listRatePlans, createRatePlan, updateRatePlan } = require('../controllers/hotelRatePlansController');
 const { getCurrentBusinessDate, runNightAudit, listNightAudits } = require('../controllers/hotelNightAuditController');
 const { listHousekeepingTasks, createHousekeepingTask, updateHousekeepingTask } = require('../controllers/housekeepingController');
 const { listMaintenanceTickets, createMaintenanceTicket, updateMaintenanceTicket, listGuestRequests, updateGuestRequest } = require('../controllers/maintenanceController');
 const { listOutlets, createOutlet, updateOutlet, deleteOutlet, setOutletItems } = require('../controllers/hotelOutletsController');
+const { listBookingGroups, createBookingGroup, updateBookingGroup, deleteBookingGroup } = require('../controllers/hotelBookingGroupsController');
 const { protect, enforceTenant } = require('../middleware/auth');
 
 const router = express.Router({ mergeParams: true });
@@ -32,6 +33,7 @@ router.post('/reservations/:reservationId/cancel', cancelReservation);
 
 router.get('/folios/by-reservation/:reservationId', getFoliosByReservation);
 router.get('/folios/lookup', lookupFolioByRoom);
+router.get('/tourism-dirham-report', getTourismDirhamReport);
 router.get('/folios/:folioId', getFolio);
 router.post('/folios/:folioId/charges', addCharge);
 router.post('/folios/:folioId/payments', recordPayment);
@@ -65,5 +67,10 @@ router.post('/outlets', createOutlet);
 router.patch('/outlets/:outletId', updateOutlet);
 router.delete('/outlets/:outletId', deleteOutlet);
 router.put('/outlets/:outletId/items', setOutletItems);
+
+router.get('/booking-groups', listBookingGroups);
+router.post('/booking-groups', createBookingGroup);
+router.patch('/booking-groups/:groupId', updateBookingGroup);
+router.delete('/booking-groups/:groupId', deleteBookingGroup);
 
 module.exports = router;

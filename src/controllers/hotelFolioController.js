@@ -216,7 +216,27 @@ const lookupFolioByRoom = asyncHandler(async (req, res) => {
   res.json({ folioId: folio.id, roomNumber: room.room_number, guestName: reservation.hotel_guests?.name || '' });
 });
 
+// @route GET /api/businesses/:businessId/hotel/tourism-dirham-report?from=&to=
+// Every Tourism Dirham charge in range, plus the total - exactly what a
+// DTCM auditor needs, generated straight from the same charges already
+// posted at check-in, not a separate manually-tracked number.
+const getTourismDirhamReport = asyncHandler(async (req, res) => {
+  let query = req.supabase
+    .from('hotel_folio_charges')
+    .select('id, description, amount_aed, created_at, hotel_folios(reservation_id, hotel_reservations(hotel_rooms(room_number), hotel_guests(name)))')
+    .eq('is_tourism_dirham', true)
+    .order('created_at', { ascending: false });
+  if (req.query.from) query = query.gte('created_at', req.query.from);
+  if (req.query.to) query = query.lte('created_at', req.query.to);
+
+  const { data, error } = await query;
+  if (error) return res.status(400).json({ message: error.message });
+
+  const total = (data || []).reduce((sum, c) => sum + Number(c.amount_aed), 0);
+  res.json({ charges: data || [], total, count: (data || []).length });
+});
+
 module.exports = {
   getFolio, getFoliosByReservation, addCharge, recordPayment,
-  recordDeposit, recordRefund, recordAdjustment, splitFolio, transferCharge, lookupFolioByRoom,
+  recordDeposit, recordRefund, recordAdjustment, splitFolio, transferCharge, lookupFolioByRoom, getTourismDirhamReport,
 };
