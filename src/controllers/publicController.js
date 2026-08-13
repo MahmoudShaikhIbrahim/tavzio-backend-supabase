@@ -218,7 +218,7 @@ const getPublicBusiness = asyncHandler(async (req, res) => {
       ? { ...program, reward_description: resolveText(program.reward_description, program.reward_description_i18n, lang) }
       : null,
     paymentEnabled: !!paymentIntegration,
-    paymentProvider: paymentIntegration?.config?.provider || 'tap',
+    paymentProvider: decryptConfig(paymentIntegration?.config)?.provider || 'tap',
     customButtons: (customButtons || []).map((b) => ({ ...b, label: resolveText(b.label, b.label_i18n, lang) })),
   });
 });
@@ -260,10 +260,8 @@ const logPublicEvent = asyncHandler(async (req, res) => {
 // to actually open the page and type their number, short enough that it
 // can't be reused later or shared around.
 const TAP_TOKEN_VALID_MINUTES = 30;
-// UAE standard VAT rate - menu prices are treated as VAT-inclusive
-// (standard local practice), so this is used to derive the breakdown
-// shown on receipts and exports, not added on top of displayed prices.
-const UAE_VAT_RATE = 0.05;
+const { calculateVatInclusive } = require('../utils/vat');
+const { decryptConfig } = require('../utils/credentialEncryption');
 
 const { getMeasure, isThresholdReady, getCurrentTier } = require('../utils/loyaltyEngine');
 
@@ -796,7 +794,7 @@ const submitOrder = asyncHandler(async (req, res) => {
       .eq('purpose', 'ordering')
       .eq('enabled', true)
       .maybeSingle();
-    integration = data;
+    integration = data ? { ...data, config: decryptConfig(data.config) } : data;
   }
 
   // Every submission is always its own separate order - deliberately, per
@@ -967,7 +965,7 @@ async function computeOrderCheckoutContext(slug, tapEventId, items) {
       .eq('purpose', 'ordering')
       .eq('enabled', true)
       .maybeSingle();
-    integration = data;
+    integration = data ? { ...data, config: decryptConfig(data.config) } : data;
   }
 
   // Same inventory check the normal order-submission path already does -
@@ -1088,6 +1086,7 @@ const payOrder = asyncHandler(async (req, res) => {
     .eq('enabled', true)
     .maybeSingle();
   if (!paymentIntegration) return res.status(404).json({ message: 'Payment is not available for this business yet' });
+  paymentIntegration.config = decryptConfig(paymentIntegration.config);
 
   const provider = paymentIntegration.config?.provider || 'tap';
   if (provider !== 'tap') {
@@ -1146,6 +1145,7 @@ const createOrderPaySession = asyncHandler(async (req, res) => {
     .eq('enabled', true)
     .maybeSingle();
   if (!paymentIntegration) return res.status(404).json({ message: 'Payment is not available for this business yet' });
+  paymentIntegration.config = decryptConfig(paymentIntegration.config);
 
   const provider = paymentIntegration.config?.provider;
   if (provider !== 'telr' && provider !== 'ngenius' && provider !== 'ziina') {
@@ -1235,6 +1235,7 @@ const confirmOrderPayment = asyncHandler(async (req, res) => {
     .eq('enabled', true)
     .maybeSingle();
   if (!paymentIntegration) return res.status(404).json({ message: 'Payment is not available for this business' });
+  paymentIntegration.config = decryptConfig(paymentIntegration.config);
 
   const adapter = payment.provider === 'telr'
     ? require('../utils/telrAdapter')
@@ -1264,7 +1265,7 @@ const confirmOrderPayment = asyncHandler(async (req, res) => {
       .eq('purpose', 'ordering')
       .eq('enabled', true)
       .maybeSingle();
-    integration = data;
+    integration = data ? { ...data, config: decryptConfig(data.config) } : data;
   }
 
   const orderItemRows = items.map(({ orders: _orders, ...item }) => item);
@@ -1273,7 +1274,86 @@ const confirmOrderPayment = asyncHandler(async (req, res) => {
   res.json({ status: 'completed', order });
 });
 
-// @route POST /api/public/business/:slug/orders/pay-cash
+// Same reconciliation pattern as reconcilePendingBillPayments below,
+// for the separate redirect-payment flow used when paying for a NEW
+// order (as opposed to paying an existing bill) - a customer whose
+// phone locks mid-redirect here needs the exact same recovery.
+async function reconcilePendingOrderPayments() {
+  const cutoff = new Date(Date.now() - RECONCILE_AFTER_MINUTES * 60000).toISOString();
+  const giveUpCutoff = new Date(Date.now() - GIVE_UP_AFTER_HOURS * 3600000).toISOString();
+
+  const { data: stuckPayments } = await supabaseAdmin
+    .from('payments')
+    .select('*')
+    .eq('status', 'pending')
+    .in('provider', ['telr', 'ngenius', 'ziina'])
+    .lt('created_at', cutoff)
+    .not('order_item_ids', 'is', null);
+
+  for (const payment of stuckPayments || []) {
+    if (payment.created_at < giveUpCutoff) {
+      await supabaseAdmin.from('payments').update({ status: 'failed', failure_reason: 'Never confirmed - gave up after 24 hours' }).eq('id', payment.id);
+      continue;
+    }
+
+    try {
+      const { data: items } = await supabaseAdmin
+        .from('order_items')
+        .select('*, orders!inner(*)')
+        .in('id', payment.order_item_ids || []);
+      const order = items?.[0]?.orders;
+      // Not every pending payment is an order-payment (bill-payments also
+      // set order_item_ids) - if there's no matching awaiting order, this
+      // one belongs to the other reconciliation job, not this one.
+      if (!order || order.status !== 'awaiting_payment') continue;
+
+      const { data: business } = await supabaseAdmin.from('businesses').select('id, features').eq('id', payment.business_id).single();
+      const { data: integrationRow } = await supabaseAdmin
+        .from('pos_integrations')
+        .select('config')
+        .eq('business_id', payment.business_id)
+        .eq('purpose', 'payment')
+        .eq('enabled', true)
+        .maybeSingle();
+      if (!integrationRow) continue;
+
+      const config = decryptConfig(integrationRow.config);
+      const adapter = payment.provider === 'telr'
+        ? require('../utils/telrAdapter')
+        : payment.provider === 'ngenius'
+        ? require('../utils/ngeniusAdapter')
+        : require('../utils/ziinaBillAdapter');
+
+      const check = await adapter.checkPaymentStatus(config, payment.provider_ref);
+      if (!check.success) continue; // transient check failure - try again next tick
+
+      if (!check.paid) {
+        await supabaseAdmin.from('payments').update({ status: 'failed', failure_reason: check.statusText || 'Not authorised' }).eq('id', payment.id);
+        await cancelAwaitingOrder(order.id);
+        continue;
+      }
+
+      await supabaseAdmin.from('payments').update({ status: 'completed' }).eq('id', payment.id);
+
+      let posIntegration = null;
+      if (business?.features?.ordering?.posIntegration) {
+        const { data } = await supabaseAdmin
+          .from('pos_integrations')
+          .select('*')
+          .eq('business_id', payment.business_id)
+          .eq('purpose', 'ordering')
+          .eq('enabled', true)
+          .maybeSingle();
+        posIntegration = data ? { ...data, config: decryptConfig(data.config) } : data;
+      }
+
+      const orderItemRows = items.map(({ orders: _orders, ...item }) => item);
+      await finalizeOrderPayment({ order, orderItemRows, integration: posIntegration, business });
+    } catch (err) {
+      console.error(`Order payment reconciliation failed for payment ${payment.id}:`, err.message);
+    }
+  }
+}
 // Body: { tapEventId, note, items }
 // No charge happens here - the order is created and its items flagged
 // cash_pending, same flag Pay Bill's cash flow already uses, so it
@@ -1400,7 +1480,7 @@ const submitBooking = asyncHandler(async (req, res) => {
       .eq('purpose', 'booking')
       .eq('enabled', true)
       .maybeSingle();
-    integration = data;
+    integration = data ? { ...data, config: decryptConfig(data.config) } : data;
   }
 
   const { data: booking, error: bookingError } = await supabaseAdmin
@@ -1613,6 +1693,14 @@ const getBill = asyncHandler(async (req, res) => {
 // Everything needed to charge a bill: validates the tap, gathers unpaid
 // items, applies loyalty discounts, and loads the payment integration.
 // Returns { errStatus, errMessage } on any failure.
+// Releases a payment reservation early on a known failure, rather than
+// making the next person wait out the full 5-minute auto-expiry for a
+// charge that already, definitively, didn't happen.
+async function releaseItemReservation(itemIds) {
+  if (!itemIds?.length) return;
+  await supabaseAdmin.from('order_items').update({ payment_reserved_until: null }).in('id', itemIds);
+}
+
 async function computeBillContext(slug, tapEventId, itemIds, tipAmount, phone) {
   const { data: business } = await supabaseAdmin
     .from('businesses')
@@ -1644,13 +1732,47 @@ async function computeBillContext(slug, tapEventId, itemIds, tipAmount, phone) {
     .eq('voided', false)
     .neq('status', 'cancelled');
 
-  const unpaidItems = (orders || []).flatMap((o) => o.order_items).filter((i) => !i.paid && !i.voided);
+  // An item currently reserved by someone else's in-flight payment
+  // attempt is excluded here entirely, same as an already-paid item -
+  // this is what stops a second customer from even seeing it as
+  // selectable while the first payment is still being processed.
+  const now = new Date();
+  const unpaidItems = (orders || []).flatMap((o) => o.order_items)
+    .filter((i) => !i.paid && !i.voided && (!i.payment_reserved_until || new Date(i.payment_reserved_until) < now));
   const selectedItems = Array.isArray(itemIds) && itemIds.length > 0
     ? unpaidItems.filter((i) => itemIds.includes(i.id))
     : unpaidItems;
 
   if (selectedItems.length === 0) {
     return { errStatus: 400, errMessage: 'Nothing to pay' };
+  }
+
+  // The actual fix, not just the filter above: atomically reserve
+  // exactly these items, using the UPDATE's WHERE clause as the real
+  // mutex (Postgres itself decides who wins, not application code
+  // racing against itself). If fewer rows come back than requested,
+  // someone else's payment attempt reserved at least one of them in
+  // the narrow window between the read above and this write - reject
+  // the whole attempt outright rather than proceed with a partial,
+  // inconsistent selection.
+  const reservedUntil = new Date(Date.now() + 5 * 60000).toISOString();
+  const nowIso = now.toISOString();
+  const { data: reserved } = await supabaseAdmin
+    .from('order_items')
+    .update({ payment_reserved_until: reservedUntil })
+    .in('id', selectedItems.map((i) => i.id))
+    .eq('paid', false)
+    .or(`payment_reserved_until.is.null,payment_reserved_until.lt.${nowIso}`)
+    .select('id');
+
+  if (!reserved || reserved.length < selectedItems.length) {
+    // Release whatever this attempt did manage to grab - never leave a
+    // failed attempt holding a partial reservation that blocks the
+    // person who actually won the race.
+    if (reserved?.length) {
+      await supabaseAdmin.from('order_items').update({ payment_reserved_until: null }).in('id', reserved.map((r) => r.id));
+    }
+    return { errStatus: 409, errMessage: 'Someone else is already paying for part of this bill - try again in a moment' };
   }
 
   const amount = selectedItems.reduce((sum, i) => sum + (i.unit_price + Number(i.addon_total || 0)) * i.quantity, 0);
@@ -1711,6 +1833,7 @@ async function computeBillContext(slug, tapEventId, itemIds, tipAmount, phone) {
   if (!integration) {
     return { errStatus: 404, errMessage: 'Payment is not available for this business yet' };
   }
+  integration.config = decryptConfig(integration.config);
 
   return { business, tapEvent, selectedItems, amount, discountAmount, discountedAmount, appliedClaim, total, integration };
 }
@@ -1810,8 +1933,7 @@ async function finalizePaidBill({ business, payment, selectedItems, appliedClaim
   // practice), so VAT is derived from the (post-discount) amount rather
   // than added on top. English only, per explicit decision - not run
   // through translation.
-  const vatAmount = Math.round((discountedAmount - discountedAmount / (1 + UAE_VAT_RATE)) * 100) / 100;
-  const subtotalExVat = Math.round((discountedAmount - vatAmount) * 100) / 100;
+  const { subtotalExVat, vatAmount, vatRate } = calculateVatInclusive(discountedAmount);
 
   const receipt = {
     items: selectedItems.map((i) => ({
@@ -1823,7 +1945,7 @@ async function finalizePaidBill({ business, payment, selectedItems, appliedClaim
     })),
     subtotalExVat,
     vatAmount,
-    vatRate: UAE_VAT_RATE,
+    vatRate,
     discountAmount,
     rewardDescription: appliedClaim?.reward_description || '',
     tip: Number(tipAmount || 0),
@@ -1850,11 +1972,13 @@ const payBill = asyncHandler(async (req, res) => {
   // configured for a redirect provider can't take a token payment.
   const provider = integration.config?.provider || 'tap';
   if (provider !== 'tap') {
+    await releaseItemReservation(selectedItems.map((i) => i.id));
     return res.status(400).json({ message: 'This business uses redirect-based payment - use the payment session flow' });
   }
 
   const { createCharge } = require('../utils/tapPaymentsAdapter');
   const result = await createCharge(integration.config, tapToken, total, 'Tavzio bill payment');
+  if (!result.success) await releaseItemReservation(selectedItems.map((i) => i.id));
 
   const { data: payment, error: paymentError } = await supabaseAdmin
     .from('payments')
@@ -1902,6 +2026,7 @@ const createPaySession = asyncHandler(async (req, res) => {
 
   const provider = integration.config?.provider;
   if (provider !== 'telr' && provider !== 'ngenius' && provider !== 'ziina') {
+    await releaseItemReservation(selectedItems.map((i) => i.id));
     return res.status(400).json({ message: 'This business does not use redirect-based payment' });
   }
 
@@ -1935,11 +2060,45 @@ const createPaySession = asyncHandler(async (req, res) => {
   const session = await adapter.createPaymentSession(integration.config, total, 'Tavzio bill payment', payment.id, returnUrl);
   if (!session.success) {
     await supabaseAdmin.from('payments').update({ status: 'failed', failure_reason: session.error || '' }).eq('id', payment.id);
+    await releaseItemReservation(selectedItems.map((i) => i.id));
     return res.status(502).json({ message: session.error || 'Could not start the payment' });
   }
 
   await supabaseAdmin.from('payments').update({ provider_ref: session.providerRef }).eq('id', payment.id);
   res.status(201).json({ paymentId: payment.id, redirectUrl: session.redirectUrl });
+});
+
+// @route POST /api/public/business/:slug/bill/cancel
+// Body: { paymentId }
+// The actual missing piece: a way to give up a payment attempt on
+// purpose, rather than making the person - or anyone else waiting on
+// the same items - sit out the full 5-minute reservation window for a
+// payment nobody intends to finish. Only ever releases the reservation
+// this specific payment holds, never anyone else's.
+const cancelBillPaySession = asyncHandler(async (req, res) => {
+  const { paymentId } = req.body;
+  if (!paymentId) return res.status(400).json({ message: 'paymentId is required' });
+
+  const { data: business } = await supabaseAdmin.from('businesses').select('id').eq('slug', req.params.slug).eq('status', 'active').single();
+  if (!business) return res.status(404).json({ message: 'Business not found' });
+
+  const { data: payment } = await supabaseAdmin
+    .from('payments')
+    .select('id, status, order_item_ids')
+    .eq('id', paymentId)
+    .eq('business_id', business.id)
+    .maybeSingle();
+  if (!payment) return res.status(404).json({ message: 'Payment not found' });
+
+  // Already resolved one way or the other - nothing to cancel, and
+  // never overwrite a real completed/failed outcome with a stale
+  // cancel request that arrived late.
+  if (payment.status !== 'pending') return res.json({ status: payment.status });
+
+  await supabaseAdmin.from('payments').update({ status: 'failed', failure_reason: 'Cancelled by customer' }).eq('id', payment.id);
+  await releaseItemReservation(payment.order_item_ids || []);
+
+  res.json({ status: 'cancelled' });
 });
 
 // @route POST /api/public/business/:slug/bill/confirm
@@ -1982,6 +2141,7 @@ const confirmPaySession = asyncHandler(async (req, res) => {
     .eq('enabled', true)
     .maybeSingle();
   if (!integration) return res.status(404).json({ message: 'Payment is not available for this business' });
+  integration.config = decryptConfig(integration.config);
 
   const adapter = payment.provider === 'telr'
     ? require('../utils/telrAdapter')
@@ -1998,6 +2158,7 @@ const confirmPaySession = asyncHandler(async (req, res) => {
 
   if (!check.paid) {
     await supabaseAdmin.from('payments').update({ status: 'failed', failure_reason: check.statusText || 'Not authorised' }).eq('id', payment.id);
+    await releaseItemReservation(payment.order_item_ids || []);
     return res.status(402).json({ message: 'Payment was not completed', status: 'failed' });
   }
 
@@ -2032,6 +2193,97 @@ const confirmPaySession = asyncHandler(async (req, res) => {
   res.json({ status: 'completed', payment: completed, receipt });
 });
 
+// =========================================================================
+// Background reconciliation - the actual fix for the gap where a
+// customer's phone locks or their connection drops mid-redirect on a
+// Telr/N-Genius/Ziina Pay Bill payment. The gateway may have genuinely
+// charged them while Tavzio never finds out, because nothing but the
+// customer's own browser calling confirmPaySession ever checks. This
+// runs on a timer (see server.js) and does exactly what confirmPaySession
+// already does - verify server-side against the real gateway, never
+// trust anything else - just triggered by a clock instead of a request.
+// =========================================================================
+
+// Payments past this age are recovered automatically. Anything genuinely
+// still pending isn't rushed - most redirect flows finish in well under
+// a minute, so 3 minutes is long enough that a normal in-progress
+// checkout is never mistaken for an abandoned one.
+const RECONCILE_AFTER_MINUTES = 3;
+// Past this age with no resolution, stop retrying and mark it failed -
+// an old order should not sit in "pending" forever, silently retried on
+// every tick indefinitely. A genuinely late gateway response after this
+// point would need a manual look, not automatic recovery.
+const GIVE_UP_AFTER_HOURS = 24;
+
+async function reconcilePendingBillPayments() {
+  const cutoff = new Date(Date.now() - RECONCILE_AFTER_MINUTES * 60000).toISOString();
+  const giveUpCutoff = new Date(Date.now() - GIVE_UP_AFTER_HOURS * 3600000).toISOString();
+
+  const { data: stuckPayments } = await supabaseAdmin
+    .from('payments')
+    .select('*')
+    .eq('status', 'pending')
+    .in('provider', ['telr', 'ngenius', 'ziina'])
+    .lt('created_at', cutoff);
+
+  for (const payment of stuckPayments || []) {
+    if (payment.created_at < giveUpCutoff) {
+      await supabaseAdmin.from('payments').update({ status: 'failed', failure_reason: 'Never confirmed - gave up after 24 hours' }).eq('id', payment.id);
+      continue;
+    }
+
+    try {
+      const { data: integration } = await supabaseAdmin
+        .from('pos_integrations')
+        .select('config')
+        .eq('business_id', payment.business_id)
+        .eq('purpose', 'payment')
+        .eq('enabled', true)
+        .maybeSingle();
+      if (!integration) continue; // gateway got disconnected since - nothing to check against
+
+      const config = decryptConfig(integration.config);
+      const adapter = payment.provider === 'telr'
+        ? require('../utils/telrAdapter')
+        : payment.provider === 'ngenius'
+        ? require('../utils/ngeniusAdapter')
+        : require('../utils/ziinaBillAdapter');
+
+      const check = await adapter.checkPaymentStatus(config, payment.provider_ref);
+      if (!check.success || !check.paid) continue; // still genuinely pending, or a transient check failure - try again next tick
+
+      const { data: business } = await supabaseAdmin.from('businesses').select('id, features').eq('id', payment.business_id).single();
+      const { data: completed } = await supabaseAdmin
+        .from('payments')
+        .update({ status: 'completed', telr_tran_ref: payment.provider === 'telr' ? (check.tranRef || '') : undefined })
+        .eq('id', payment.id)
+        .select()
+        .single();
+
+      const { data: items } = await supabaseAdmin.from('order_items').select('*').in('id', payment.order_item_ids || []);
+      let appliedClaim = null;
+      if (payment.reward_claim_id) {
+        const { data: claim } = await supabaseAdmin.from('loyalty_reward_claims').select('*').eq('id', payment.reward_claim_id).maybeSingle();
+        appliedClaim = claim;
+      }
+      const amount = Number(payment.amount);
+      const discountAmount = Number(payment.discount_amount || 0);
+      const discountedAmount = Math.max(0, amount - discountAmount);
+      const tipAmount = Number(payment.tip_amount || 0);
+      const total = discountedAmount + tipAmount;
+
+      await finalizePaidBill({
+        business, payment: completed, selectedItems: items || [], appliedClaim,
+        discountAmount, discountedAmount, amount, tipAmount, phone: '', total,
+      });
+    } catch (err) {
+      // One payment's reconciliation blowing up must never stop the rest
+      // from being checked on this same tick.
+      console.error(`Reconciliation failed for payment ${payment.id}:`, err.message);
+    }
+  }
+}
+
 module.exports = {
   resolveCardTap,
   getPublicBusiness,
@@ -2053,4 +2305,7 @@ module.exports = {
   payBill,
   createPaySession,
   confirmPaySession,
+  cancelBillPaySession,
+  reconcilePendingBillPayments,
+  reconcilePendingOrderPayments,
 };

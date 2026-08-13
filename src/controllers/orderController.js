@@ -2,6 +2,8 @@ const { supabaseAdmin } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 const { logAction } = require('../utils/auditLog');
 const { maybeAutoCloseTable } = require('../utils/tableAutoClose');
+const { calculateVatInclusive } = require('../utils/vat');
+const { decryptConfig } = require('../utils/credentialEncryption');
 
 // @route GET /api/businesses/:businessId/orders?status=
 // Only real food orders - call_waiter/request_bill quick requests are
@@ -318,7 +320,7 @@ const createPosOrder = asyncHandler(async (req, res) => {
     if (folio.status === 'closed') return res.status(400).json({ message: 'This folio is closed - cannot charge to it' });
   }
 
-  const { data: business } = await req.supabase.from('businesses').select('features').eq('id', req.params.businessId).single();
+  const { data: business } = await req.supabase.from('businesses').select('features, category').eq('id', req.params.businessId).single();
 
   const menuItemIds = items.map((i) => i.menuItemId);
   const { data: menuItems } = await req.supabase
@@ -391,16 +393,28 @@ const createPosOrder = asyncHandler(async (req, res) => {
   // it counts toward their reconciliation at close-out. Card/other
   // payments (an external card machine, etc) never touch the till at
   // all - only cash needs physical reconciliation.
+  //
+  // For a hotel, the till is also how an order gets tagged with which
+  // outlet it came from - since a till is locked to one outlet for its
+  // whole session, that's the real, unspoofable source of truth (never
+  // taken from client input directly). This means a hotel POS order of
+  // ANY payment method needs an open till, not just cash - the till is
+  // what makes "which station is this" a real, enforced fact rather
+  // than just a label someone typed in.
   let tillSessionId = null;
-  if (paymentMethod === 'cash') {
+  let hotelOutletId = null;
+  if (paymentMethod === 'cash' || business?.category === 'hotel') {
     const { data: till } = await req.supabase
       .from('till_sessions')
-      .select('id')
+      .select('id, outlet_id')
       .eq('staff_id', req.user.id)
       .eq('status', 'open')
       .maybeSingle();
-    if (!till) return res.status(400).json({ message: 'Open a till before taking a cash order' });
+    if (!till) {
+      return res.status(400).json({ message: business?.category === 'hotel' ? 'Open a till for your outlet before taking an order' : 'Open a till before taking a cash order' });
+    }
     tillSessionId = till.id;
+    hotelOutletId = till.outlet_id;
   }
 
   const { data: order, error: orderError } = await req.supabase
@@ -415,6 +429,7 @@ const createPosOrder = asyncHandler(async (req, res) => {
       source: 'staff_pos',
       payment_method: chargeToFolioId ? 'other' : paymentMethod,
       till_session_id: tillSessionId,
+      hotel_outlet_id: hotelOutletId,
       placed_by: req.user.id,
       charged_to_folio_id: chargeToFolioId || null,
       discount_type: discountType || null,
@@ -450,6 +465,7 @@ const createPosOrder = asyncHandler(async (req, res) => {
   if (paymentMethod === 'card_online') {
     const { supabaseAdmin: sa } = require('../config/supabaseClient');
     const { data: config } = await sa.from('pos_integrations').select('config').eq('business_id', req.params.businessId).eq('purpose', 'payment').eq('enabled', true).maybeSingle();
+    if (config) config.config = decryptConfig(config.config);
     const provider = config?.config?.provider;
     const adapter = provider === 'telr' ? require('../utils/telrAdapter') : provider === 'ngenius' ? require('../utils/ngeniusAdapter') : provider === 'ziina' ? require('../utils/ziinaBillAdapter') : null;
     if (!config || !adapter) {
@@ -489,11 +505,11 @@ const createPosOrder = asyncHandler(async (req, res) => {
       .maybeSingle();
     if (integration) {
       const { pushOrderToPos } = require('../utils/posDispatcher');
-      pushOrderToPos(integration.provider, integration.config, order, insertedItems).catch(() => {});
+      pushOrderToPos(integration.provider, decryptConfig(integration.config), order, insertedItems).catch(() => {});
     }
   }
 
-  res.status(201).json({ order, items: insertedItems });
+  res.status(201).json({ order, items: insertedItems, vatBreakdown: calculateVatInclusive(order.total) });
 });
 
 // @route POST /api/businesses/:businessId/orders/:orderId/manual-payment
@@ -581,7 +597,7 @@ const recordManualPayment = asyncHandler(async (req, res) => {
         .eq('purpose', 'ordering')
         .eq('enabled', true)
         .maybeSingle();
-      integration = data;
+      integration = data ? { ...data, config: decryptConfig(data.config) } : data;
     }
 
     await supabaseAdmin
@@ -663,6 +679,7 @@ const confirmPosCardPayment = asyncHandler(async (req, res) => {
   if (txn.status === 'failed') return res.status(402).json({ message: txn.failure_reason || 'Payment failed', status: 'failed' });
 
   const { data: config } = await req.supabase.from('pos_integrations').select('config').eq('business_id', req.params.businessId).eq('purpose', 'payment').eq('enabled', true).maybeSingle();
+  if (config) config.config = decryptConfig(config.config);
   const adapter = txn.provider === 'telr' ? require('../utils/telrAdapter') : txn.provider === 'ngenius' ? require('../utils/ngeniusAdapter') : txn.provider === 'ziina' ? require('../utils/ziinaBillAdapter') : null;
   const result = adapter ? await adapter.checkPaymentStatus(config?.config, txn.provider_ref) : { success: false, error: 'No adapter for this provider' };
 
@@ -685,8 +702,71 @@ const confirmPosCardPayment = asyncHandler(async (req, res) => {
     deductStock({ businessId: req.params.businessId, orderItemRows: order.order_items, orderId: order.id }).catch(() => {});
   }
 
-  res.json({ status: 'completed', order });
+  res.json({ status: 'completed', order, vatBreakdown: calculateVatInclusive(order.total) });
 });
+
+// Same reconciliation pattern as publicController's two - recovers a
+// staff-initiated card_online POS sale where the confirm step never
+// happened (browser closed, terminal lost network right after the
+// charge). Careful distinction the manual endpoint above doesn't make:
+// a failed *check* (network hiccup, provider outage) is not the same
+// as a genuinely *declined* payment - only the latter gets marked
+// failed here, so a transient blip doesn't wrongly kill a transaction
+// that's actually fine and just needs to be checked again next tick.
+const RECONCILE_AFTER_MINUTES = 3;
+const GIVE_UP_AFTER_HOURS = 24;
+
+async function reconcilePendingPosCardPayments() {
+  const cutoff = new Date(Date.now() - RECONCILE_AFTER_MINUTES * 60000).toISOString();
+  const giveUpCutoff = new Date(Date.now() - GIVE_UP_AFTER_HOURS * 3600000).toISOString();
+
+  const { data: stuckTxns } = await supabaseAdmin
+    .from('payment_transactions')
+    .select('*')
+    .eq('status', 'pending')
+    .in('provider', ['telr', 'ngenius', 'ziina'])
+    .lt('created_at', cutoff);
+
+  for (const txn of stuckTxns || []) {
+    if (txn.created_at < giveUpCutoff) {
+      await supabaseAdmin.from('payment_transactions').update({ status: 'failed', failure_reason: 'Never confirmed - gave up after 24 hours' }).eq('id', txn.id);
+      continue;
+    }
+
+    try {
+      const { data: config } = await supabaseAdmin.from('pos_integrations').select('config').eq('business_id', txn.business_id).eq('purpose', 'payment').eq('enabled', true).maybeSingle();
+      if (!config) continue;
+      const decryptedConfig = decryptConfig(config.config);
+
+      const adapter = txn.provider === 'telr' ? require('../utils/telrAdapter') : txn.provider === 'ngenius' ? require('../utils/ngeniusAdapter') : txn.provider === 'ziina' ? require('../utils/ziinaBillAdapter') : null;
+      if (!adapter) continue;
+
+      const result = await adapter.checkPaymentStatus(decryptedConfig, txn.provider_ref);
+      if (!result.success) continue; // transient check failure - try again next tick
+
+      if (!result.paid) {
+        await supabaseAdmin.from('payment_transactions').update({ status: 'failed', failure_reason: result.error || 'Not confirmed as paid' }).eq('id', txn.id);
+        continue;
+      }
+
+      await supabaseAdmin.from('payment_transactions').update({ status: 'completed', confirmed_at: new Date().toISOString() }).eq('id', txn.id);
+
+      const { data: order } = await supabaseAdmin.from('orders').select('*, order_items(*)').eq('id', txn.context_id).single();
+      if (!order) continue;
+
+      await supabaseAdmin.from('order_items').update({ paid: true, paid_at: new Date().toISOString() }).eq('order_id', order.id);
+      await supabaseAdmin.from('orders').update({ payment_transaction_id: txn.id }).eq('id', order.id);
+
+      const { data: business } = await supabaseAdmin.from('businesses').select('features').eq('id', txn.business_id).single();
+      if (business?.features?.inventory?.enabled) {
+        const { deductStock } = require('../utils/inventoryStock');
+        deductStock({ businessId: txn.business_id, orderItemRows: order.order_items, orderId: order.id }).catch(() => {});
+      }
+    } catch (err) {
+      console.error(`POS card payment reconciliation failed for transaction ${txn.id}:`, err.message);
+    }
+  }
+}
 
 // @route POST /api/businesses/:businessId/orders/:orderId/fire-course
 // Body: { course }
@@ -709,4 +789,4 @@ const fireCourse = asyncHandler(async (req, res) => {
   res.json({ message: `Fired ${data.length} item(s)`, items: data });
 });
 
-module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, confirmPosCardPayment, listRequests, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse };
+module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, confirmPosCardPayment, listRequests, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse, reconcilePendingPosCardPayments };

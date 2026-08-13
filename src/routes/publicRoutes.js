@@ -24,6 +24,7 @@ const {
   payBill,
   createPaySession,
   confirmPaySession,
+  cancelBillPaySession,
 } = require('../controllers/publicController');
 
 const router = express.Router();
@@ -48,6 +49,7 @@ router.post('/business/:slug/bill/cash-pending', markItemsCashPending);
 router.post('/business/:slug/bill/pay', payBill);
 router.post('/business/:slug/bill/pay-session', createPaySession);
 router.post('/business/:slug/bill/confirm', confirmPaySession);
+router.post('/business/:slug/bill/cancel', cancelBillPaySession);
 
 router.post('/leads', submitLead);
 

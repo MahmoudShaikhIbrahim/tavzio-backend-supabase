@@ -37,7 +37,7 @@ const inviteStaff = asyncHandler(async (req, res) => {
 const listStaff = asyncHandler(async (req, res) => {
   const { data, error } = await req.supabase
     .from('profiles')
-    .select('id, name, role, job_role, is_active, last_login_at, created_at, assigned_sections')
+    .select('id, name, role, job_role, is_active, last_login_at, created_at, assigned_sections, assigned_outlet_ids')
     .eq('business_id', req.params.businessId)
     .in('role', ['staff', 'business_owner']);
 
@@ -157,4 +157,29 @@ const setStaffSections = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
-module.exports = { inviteStaff, listStaff, setStaffActive, setStaffJobRole, setStaffSections, listRolePermissions, resetPassword };
+// @route PATCH /api/businesses/:businessId/staff/:userId/outlets
+// Body: { outletIds: string[] | null }
+// Hotel-only in practice - which specific outlet(s) this staff account
+// may open a till against. null (default) = unrestricted, same
+// backward-compatible convention as assigned_sections. This is what
+// makes "the beach attendant can't accidentally open the lobby till"
+// a real, server-enforced fact (checked in tillController's openTill),
+// not just a UI suggestion.
+const setStaffOutlets = asyncHandler(async (req, res) => {
+  const { outletIds } = req.body;
+  if (outletIds !== null && !Array.isArray(outletIds)) {
+    return res.status(400).json({ message: 'outletIds must be an array or null' });
+  }
+  const { data, error } = await req.supabase
+    .from('profiles')
+    .update({ assigned_outlet_ids: outletIds })
+    .eq('id', req.params.userId)
+    .eq('business_id', req.params.businessId)
+    .eq('role', 'staff')
+    .select('id, name, assigned_outlet_ids')
+    .single();
+  if (error || !data) return res.status(404).json({ message: 'Staff member not found' });
+  res.json(data);
+});
+
+module.exports = { inviteStaff, listStaff, setStaffActive, setStaffJobRole, setStaffSections, setStaffOutlets, listRolePermissions, resetPassword };

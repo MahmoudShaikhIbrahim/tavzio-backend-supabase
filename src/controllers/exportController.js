@@ -1,15 +1,10 @@
 const PDFDocument = require('pdfkit');
 const asyncHandler = require('../utils/asyncHandler');
-
-// UAE standard VAT rate - menu prices are treated as VAT-inclusive
-// (standard local practice), so exports break out what portion of each
-// total is actually VAT, rather than just showing a bare number.
-const UAE_VAT_RATE = 0.05;
+const { calculateVatInclusive } = require('../utils/vat');
 
 function vatBreakdown(grossAmount) {
-  const vat = Math.round((grossAmount - grossAmount / (1 + UAE_VAT_RATE)) * 100) / 100;
-  const net = Math.round((grossAmount - vat) * 100) / 100;
-  return { net, vat };
+  const { subtotalExVat, vatAmount } = calculateVatInclusive(grossAmount);
+  return { net: subtotalExVat, vat: vatAmount };
 }
 
 // Turns an array of plain objects into CSV text - no external library

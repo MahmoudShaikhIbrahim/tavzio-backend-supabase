@@ -1,6 +1,7 @@
 const asyncHandler = require('../utils/asyncHandler');
 const { supabaseAdmin } = require('../config/supabaseClient');
 const { logAction } = require('../utils/auditLog');
+const { decryptConfig } = require('../utils/credentialEncryption');
 
 function getAdapter(provider) {
   if (provider === 'telr') return require('../utils/telrAdapter');
@@ -11,7 +12,7 @@ function getAdapter(provider) {
 
 async function getPaymentIntegration(businessId) {
   const { data } = await supabaseAdmin.from('pos_integrations').select('config').eq('business_id', businessId).eq('purpose', 'payment').eq('enabled', true).maybeSingle();
-  return data?.config || null;
+  return data?.config ? decryptConfig(data.config) : null;
 }
 
 const createFolioPaymentSession = asyncHandler(async (req, res) => {
@@ -104,6 +105,7 @@ const refundTransaction = asyncHandler(async (req, res) => {
 
   const { data: integration } = await supabaseAdmin.from('pos_integrations').select('config').eq('business_id', req.params.businessId).eq('purpose', 'payment').maybeSingle();
   if (!integration) return res.status(404).json({ message: 'Payment integration not configured' });
+  integration.config = decryptConfig(integration.config);
 
   const adapter = getAdapter(txn.provider);
   if (!adapter?.createRefund) return res.status(400).json({ message: `Refunds for ${txn.provider} require its own dashboard, not supported here yet` });

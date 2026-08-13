@@ -1,6 +1,7 @@
 const { supabaseAdmin } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 const { logAction } = require('../utils/auditLog');
+const { encryptConfig, decryptConfig } = require('../utils/credentialEncryption');
 
 // @route GET /api/businesses/:businessId/payment-integration
 // business_owner only - full config including the Tap secret key.
@@ -15,7 +16,7 @@ const getPaymentIntegration = asyncHandler(async (req, res) => {
     .maybeSingle();
 
   if (error) return res.status(400).json({ message: error.message });
-  res.json(data || null);
+  res.json(data ? { ...data, config: decryptConfig(data.config) } : null);
 });
 
 // @route PUT /api/businesses/:businessId/payment-integration
@@ -31,7 +32,7 @@ const upsertPaymentIntegration = asyncHandler(async (req, res) => {
         purpose: 'payment',
         provider: config?.provider || 'tap',
         enabled: !!enabled,
-        config: config || {},
+        config: encryptConfig(config || {}),
         status: enabled ? 'connected' : 'disconnected',
       },
       { onConflict: 'business_id,purpose' }
@@ -51,7 +52,10 @@ const upsertPaymentIntegration = asyncHandler(async (req, res) => {
     details: { provider: data.provider, enabled: data.enabled },
   });
 
-  res.json(data);
+  // Return the readable config the owner just submitted, not the
+  // encrypted blob just written - res.json(data) would otherwise hand
+  // back ciphertext where the frontend expects to redisplay the form.
+  res.json({ ...data, config: config || {} });
 });
 
 // @route GET /api/businesses/:businessId/payment-integration/status

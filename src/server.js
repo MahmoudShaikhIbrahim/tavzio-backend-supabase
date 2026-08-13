@@ -54,9 +54,27 @@ app.use('/api/public/contracts', publicLimiter, publicContractRoutes);
 app.use('/api/stripe', stripeRoutes);
 app.use('/api/leads', apiLimiter, leadRoutes);
 app.use('/api/deliverect', deliverectRoutes);
+app.use('/api/organizations', apiLimiter, require('./routes/organizationRoutes'));
+app.get('/api/zoho-books/callback', require('./controllers/zohoBooksController').oauthCallback);
 
 app.use(notFound);
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Tavzio API (Supabase) running on port ${PORT}`));
+
+// Payment reconciliation - recovers a payment whose customer or staff
+// member never made it back from the gateway's redirect (locked phone,
+// closed tab, dropped connection) but whose charge genuinely succeeded
+// on the gateway's side. Runs every 2 minutes; each run only touches
+// payments stuck 3+ minutes, so a normal in-progress checkout is never
+// mistaken for an abandoned one. Covers all three redirect-payment
+// paths: paying an existing bill, paying for a new order, and a
+// staff-initiated card_online POS sale.
+const { reconcilePendingBillPayments, reconcilePendingOrderPayments } = require('./controllers/publicController');
+const { reconcilePendingPosCardPayments } = require('./controllers/orderController');
+setInterval(() => {
+  reconcilePendingBillPayments().catch((err) => console.error('Bill payment reconciliation run failed:', err.message));
+  reconcilePendingOrderPayments().catch((err) => console.error('Order payment reconciliation run failed:', err.message));
+  reconcilePendingPosCardPayments().catch((err) => console.error('POS card payment reconciliation run failed:', err.message));
+}, 2 * 60 * 1000);

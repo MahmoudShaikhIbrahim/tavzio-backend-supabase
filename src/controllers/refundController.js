@@ -1,6 +1,7 @@
 const { supabaseAdmin } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 const { logAction } = require('../utils/auditLog');
+const { decryptConfig } = require('../utils/credentialEncryption');
 
 // @route POST /api/businesses/:businessId/payments/:paymentId/refund
 // Body: { amount?, reason? } - amount omitted means refund the full
@@ -50,6 +51,7 @@ const refundPayment = asyncHandler(async (req, res) => {
     .eq('purpose', 'payment')
     .maybeSingle();
   if (!integration) return res.status(404).json({ message: 'Payment integration not configured' });
+  integration.config = decryptConfig(integration.config);
 
   // Telr's refund/void goes through a genuinely different endpoint
   // (remote.html, not order.json) with a URL-encoded response format

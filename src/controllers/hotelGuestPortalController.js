@@ -1,5 +1,6 @@
 const asyncHandler = require('../utils/asyncHandler');
 const { supabaseAdmin } = require('../config/supabaseClient');
+const { calculateVatInclusive } = require('../utils/vat');
 
 // Shared context resolver - every guest-portal endpoint needs the same
 // business -> room -> active reservation chain, verified fresh every
@@ -60,6 +61,10 @@ const getGuestPortal = asyncHandler(async (req, res) => {
     guest: reservation ? { name: reservation.hotel_guests?.name, checkInDate: reservation.check_in_date, checkOutDate: reservation.check_out_date } : null,
     folioId,
     folioBalance,
+    // Room rate and F&B charges are quoted VAT-inclusive (same UAE
+    // convention as menu prices) - this breaks that out for the guest's
+    // bill, same way the restaurant Pay Bill flow already does.
+    vatBreakdown: folioBalance !== null ? calculateVatInclusive(folioBalance) : null,
     charges,
   });
 });

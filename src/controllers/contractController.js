@@ -5,6 +5,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const { logAction } = require('../utils/auditLog');
 const { sendContractSignLink } = require('../utils/notifications');
 const { createSubscriptionCheckoutSession } = require('../utils/stripeAdapter');
+const { calculateVatExclusive } = require('../utils/vat');
 
 const DEFAULT_SYSTEM_FEE = 200;
 const DEFAULT_CARD_PRICE = 20;
@@ -101,6 +102,11 @@ function formatLongDate(d) {
 function buildContractText(contract, business) {
   const freqLabel = { monthly: 'monthly', quarterly: 'quarterly', yearly: 'annually' }[contract.payment_frequency];
   const perPayment = contract.annual_total_aed / periodsPerYear(contract.payment_frequency);
+  // Contract amounts are the net/subtotal fee (standard UAE B2B
+  // convention) - 5% VAT is added on top and stated explicitly, never
+  // silently absorbed into the headline figure.
+  const { vatAmount: annualVat, totalIncVat: annualTotalIncVat } = calculateVatExclusive(contract.annual_total_aed);
+  const { totalIncVat: perPaymentIncVat } = calculateVatExclusive(perPayment);
 
   return `TAVZIO SERVICE AGREEMENT
 Contract No: ${contract.contract_number}
@@ -114,7 +120,7 @@ Provider shall supply the Client with access to the Tavzio digital guest-engagem
 This Agreement is for a fixed term of one (1) year from the Effective Date, and shall automatically renew for successive one-year terms unless either party gives written notice of non-renewal at least thirty (30) days before the end of the then-current Term.
 
 3. FEES AND PAYMENT
-The Client shall pay Provider a platform fee of AED ${contract.system_fee_aed} per month plus AED ${contract.card_price_aed} per stand per month, totaling AED ${contract.annual_total_aed.toFixed(2)} per year, payable ${freqLabel} in installments of AED ${perPayment.toFixed(2)} each. Payment is due on the date specified on each issued receipt. A payment not received within five (5) days of its due date, after two reminder notices, may result in suspension of the Client's access to the Service. Non-payment continuing for thirty (30) days shall constitute a material breach entitling Provider to terminate this Agreement without further notice and without compensation to the Client.
+The Client shall pay Provider a platform fee of AED ${contract.system_fee_aed} per month plus AED ${contract.card_price_aed} per stand per month, totaling AED ${contract.annual_total_aed.toFixed(2)} per year (excluding VAT), plus 5% UAE VAT of AED ${annualVat.toFixed(2)}, for a total of AED ${annualTotalIncVat.toFixed(2)} per year inclusive of VAT, payable ${freqLabel} in installments of AED ${perPayment.toFixed(2)} each excluding VAT (AED ${perPaymentIncVat.toFixed(2)} inclusive of VAT). Payment is due on the date specified on each issued receipt, which will state the VAT amount separately as required under UAE Federal Decree-Law No. 8 of 2017 on Value Added Tax. A payment not received within five (5) days of its due date, after two reminder notices, may result in suspension of the Client's access to the Service. Non-payment continuing for thirty (30) days shall constitute a material breach entitling Provider to terminate this Agreement without further notice and without compensation to the Client.
 
 4. HARDWARE
 The NFC stands supplied under this Agreement remain the property of Provider at all times and are rented, not sold. Upon termination or expiry of this Agreement, the Client shall return all stands to Provider in good working condition within fourteen (14) days, ordinary wear and tear excepted. The Client shall bear the cost of repair or replacement for stands lost, stolen, or damaged beyond ordinary wear and tear.

@@ -94,6 +94,10 @@ router.put('/:businessId/external-hotel-systems/:provider', protect, enforceTena
 router.delete('/:businessId/external-hotel-systems/:provider', protect, enforceTenant, require('../controllers/externalHotelSystemsController').disconnectExternalIntegration);
 router.get('/:businessId/delivery-integration', protect, enforceTenant, getDeliveryIntegration);
 router.put('/:businessId/delivery-integration', protect, enforceTenant, upsertDeliveryIntegration);
+router.get('/:businessId/zoho-books/connect', protect, enforceTenant, authorize('business_owner', 'super_admin'), require('../controllers/zohoBooksController').getConnectUrl);
+router.get('/:businessId/zoho-books/status', protect, enforceTenant, require('../controllers/zohoBooksController').getStatus);
+router.delete('/:businessId/zoho-books', protect, enforceTenant, authorize('business_owner', 'super_admin'), require('../controllers/zohoBooksController').disconnect);
+router.post('/:businessId/zoho-books/sync', protect, enforceTenant, authorize('business_owner', 'super_admin'), require('../controllers/zohoBooksController').syncReceipts);
 router.get('/:businessId/audit-report/pdf', protect, enforceTenant, require('../controllers/auditReportController').generateBusinessAuditReport);
 router.use('/:businessId/printer-integration', printerRoutes);
 router.use('/:businessId/tables', tableReceiptRoutes);

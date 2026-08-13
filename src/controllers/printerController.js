@@ -2,6 +2,7 @@ const { supabaseAdmin } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 const { listPrinters } = require('../utils/printNodeAdapter');
 const { logAction } = require('../utils/auditLog');
+const { encryptConfig, decryptConfig } = require('../utils/credentialEncryption');
 
 // @route GET /api/businesses/:businessId/printer-integration
 // business_owner only - full config including the raw PrintNode API key.
@@ -16,7 +17,7 @@ const getPrinterIntegration = asyncHandler(async (req, res) => {
     .maybeSingle();
 
   if (error) return res.status(400).json({ message: error.message });
-  res.json(data || null);
+  res.json(data ? { ...data, config: decryptConfig(data.config) } : null);
 });
 
 // @route POST /api/businesses/:businessId/printer-integration/printers
@@ -34,6 +35,7 @@ const listAvailablePrinters = asyncHandler(async (req, res) => {
 // business_owner only. Body: { enabled, apiKey, printerId, printerName }
 const upsertPrinterIntegration = asyncHandler(async (req, res) => {
   const { enabled, apiKey, printerId, printerName } = req.body;
+  const config = { apiKey: apiKey || '', printerId: printerId || '', printerName: printerName || '' };
 
   const { data, error } = await req.supabase
     .from('pos_integrations')
@@ -43,7 +45,7 @@ const upsertPrinterIntegration = asyncHandler(async (req, res) => {
         purpose: 'printing',
         provider: 'printnode',
         enabled: !!enabled,
-        config: { apiKey: apiKey || '', printerId: printerId || '', printerName: printerName || '' },
+        config: encryptConfig(config),
         status: enabled ? 'connected' : 'disconnected',
       },
       { onConflict: 'business_id,purpose' }
@@ -62,7 +64,9 @@ const upsertPrinterIntegration = asyncHandler(async (req, res) => {
     details: { purpose: 'printing', provider: 'printnode', enabled: data.enabled, printerName },
   });
 
-  res.json(data);
+  // Same reasoning as paymentController's upsert: return the readable
+  // config just submitted, not the encrypted blob just written.
+  res.json({ ...data, config });
 });
 
 // @route GET /api/businesses/:businessId/printer-integration/status
@@ -78,7 +82,8 @@ const getPrinterStatus = asyncHandler(async (req, res) => {
     .maybeSingle();
 
   if (error) return res.status(400).json({ message: error.message });
-  res.json(data ? { enabled: data.enabled, status: data.status, printerName: data.config?.printerName || '' } : null);
+  const config = data ? decryptConfig(data.config) : null;
+  res.json(data ? { enabled: data.enabled, status: data.status, printerName: config?.printerName || '' } : null);
 });
 
 module.exports = { getPrinterIntegration, listAvailablePrinters, upsertPrinterIntegration, getPrinterStatus };

@@ -2,6 +2,7 @@ const PDFDocument = require('pdfkit');
 const asyncHandler = require('../utils/asyncHandler');
 const { createPaymentIntent, registerWebhook, verifyWebhookSignature, isFromZiinaIp } = require('../utils/ziinaAdapter');
 const { supabaseAdmin } = require('../config/supabaseClient');
+const { calculateVatExclusive, calculateVatInclusive } = require('../utils/vat');
 
 // @route GET /api/businesses/:businessId/receipts
 // Business owner/staff see their own; super_admin can view any business's
@@ -54,7 +55,14 @@ const createReceipt = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'At least one line item is required' });
   }
 
-  const amount = lineItems.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  // line_items stay net (excl. VAT) - that's what the itemized table on
+  // the PDF shows, exactly like a standard tax invoice. `amount` is what
+  // this receipt actually charges: the real VAT-inclusive total, since
+  // that's also what gets sent to Ziina below - VAT must genuinely be
+  // collected under UAE Federal Decree-Law No. 8 of 2017, not just
+  // shown on paper while the real charge stays net.
+  const netAmount = lineItems.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const amount = calculateVatExclusive(netAmount).totalIncVat;
 
   const { data: branding } = await req.supabase
     .from('receipt_branding')
@@ -221,15 +229,35 @@ const getReceiptPdf = asyncHandler(async (req, res) => {
   });
 
   doc.moveTo(56, y + 4).lineTo(539, y + 4).strokeColor(brass).lineWidth(1).stroke();
+
+  // VAT breakdown - receipt.amount is the net/subtotal fee (same UAE B2B
+  // convention as the contract this receipt is issued under), so VAT is
+  // added on top and shown as its own line, not silently folded into
+  // the total the way it used to be. Required under UAE Federal
+  // Decree-Law No. 8 of 2017 on Value Added Tax for any registered
+  // supplier's tax invoice - and the FTA-audit angle this whole receipts
+  // system was built around only actually holds up if VAT is broken out
+  // explicitly, not just implied.
+  // receipt.amount is already VAT-inclusive (the real charged total,
+  // see createReceipt/generateContractReceipt) - derive the breakdown
+  // backward from it, exactly like customer-facing receipts, not add
+  // VAT on top a second time.
+  const { subtotalExVat, vatAmount, totalIncVat } = calculateVatInclusive(receipt.amount);
+  doc.fontSize(10.5).font('Helvetica').fillColor('#333')
+    .text('Subtotal (excl. VAT)', 56, y + 12)
+    .text(`AED ${subtotalExVat.toFixed(2)}`, 420, y + 12, { width: 119, align: 'right' });
+  doc.text('VAT (5%)', 56, y + 30)
+    .text(`AED ${vatAmount.toFixed(2)}`, 420, y + 30, { width: 119, align: 'right' });
+  doc.moveTo(56, y + 50).lineTo(539, y + 50).strokeColor('#ddd').lineWidth(0.5).stroke();
   doc.fontSize(13).font('Helvetica-Bold').fillColor(ink)
-    .text('Total', 56, y + 14)
-    .text(`AED ${Number(receipt.amount).toFixed(2)}`, 420, y + 14, { width: 119, align: 'right' });
+    .text('Total (incl. VAT)', 56, y + 58)
+    .text(`AED ${totalIncVat.toFixed(2)}`, 420, y + 58, { width: 119, align: 'right' });
 
   // The two calls above leave PDFKit's internal cursor (doc.x) sitting at
   // 420 (the last text call's x) - anything written next without an
   // explicit x would inherit that and get pushed off the right edge.
   // Reset both x and y explicitly to a fresh line below the total.
-  let notesY = y + 14 + 26;
+  let notesY = y + 58 + 26;
   if (receipt.notes) {
     doc.fontSize(10).font('Helvetica-Bold').fillColor(ink).text('Notes', 56, notesY, { width: 483 });
     notesY = doc.y + 4;
@@ -411,6 +439,11 @@ const generateContractReceipt = asyncHandler(async (req, res) => {
   const lineItems = [
     { description: `Tavzio platform subscription (${contract.payment_frequency} installment under Contract ${contract.contract_number})`, amount: perPayment },
   ];
+  // Same rule as createReceipt: line item stays net, amount actually
+  // charged is VAT-inclusive - the contract text itself already states
+  // both figures, this just makes sure the receipt and the real Ziina
+  // charge match what the contract promised, VAT included.
+  const amountIncVat = calculateVatExclusive(perPayment).totalIncVat;
 
   const { data: branding } = await req.supabase.from('receipt_branding').select('*').limit(1).maybeSingle();
   const receiptNumber = await nextReceiptNumber(req.supabase);
@@ -422,7 +455,7 @@ const generateContractReceipt = asyncHandler(async (req, res) => {
       receipt_number: receiptNumber,
       receipt_type: 'monthly',
       line_items: lineItems,
-      amount: perPayment,
+      amount: amountIncVat,
       period_label: periodLabel,
       notes: '',
       stamp_url: branding?.stamp_url || '',
@@ -438,7 +471,7 @@ const generateContractReceipt = asyncHandler(async (req, res) => {
 
   const appUrl = process.env.CLIENT_URL || '';
   const ziinaResult = await createPaymentIntent({
-    amountAed: perPayment,
+    amountAed: amountIncVat,
     message: `${business?.name || 'Tavzio'} - Receipt ${receiptNumber}`,
     successUrl: `${appUrl}/admin/dashboard/receipts?paid=${data.id}`,
     cancelUrl: `${appUrl}/admin/dashboard/receipts`,

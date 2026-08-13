@@ -1,5 +1,6 @@
 const { supabaseAdmin } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
+const { encryptConfig, decryptConfig } = require('../utils/credentialEncryption');
 
 const ORDERING_PROVIDERS = ['foodics', 'square', 'loyverse'];
 const BOOKING_PROVIDERS = ['zenoti', 'fresha', 'square'];
@@ -17,7 +18,7 @@ const getIntegration = asyncHandler(async (req, res) => {
     .maybeSingle();
 
   if (error) return res.status(400).json({ message: error.message });
-  res.json(data || null);
+  res.json(data ? { ...data, config: decryptConfig(data.config) } : null);
 });
 
 // @route PUT /api/businesses/:businessId/pos-integration
@@ -41,7 +42,7 @@ const upsertIntegration = asyncHandler(async (req, res) => {
         purpose,
         provider,
         enabled: !!enabled,
-        config: config || {},
+        config: encryptConfig(config || {}),
         status: enabled ? 'connected' : 'disconnected',
       },
       { onConflict: 'business_id,purpose' }
@@ -50,7 +51,9 @@ const upsertIntegration = asyncHandler(async (req, res) => {
     .single();
 
   if (error) return res.status(400).json({ message: error.message });
-  res.json(data);
+  // Same rule as every other credential upsert - return what was just
+  // submitted, never the encrypted blob just written.
+  res.json({ ...data, config: config || {} });
 });
 
 // @route GET /api/businesses/:businessId/pos-integration/status?purpose=ordering|booking

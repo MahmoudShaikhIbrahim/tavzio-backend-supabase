@@ -1,6 +1,7 @@
 const PDFDocument = require('pdfkit');
 const asyncHandler = require('../utils/asyncHandler');
 const { supabaseAdmin } = require('../config/supabaseClient');
+const { decryptConfig } = require('../utils/credentialEncryption');
 
 const BRASS = '#b8925a';
 const INK = '#20170f';
@@ -83,9 +84,10 @@ const generateBusinessAuditReport = asyncHandler(async (req, res) => {
     .eq('business_id', req.params.businessId)
     .eq('purpose', 'payment')
     .maybeSingle();
+  const decryptedConfig = decryptConfig(paymentIntegration?.config);
   const PROVIDER_LABELS = { tap: 'Tap Payments', telr: 'Telr', ngenius: 'N-Genius Online', ziina: 'Ziina' };
-  const paymentsSectionTitle = paymentIntegration?.config?.provider
-    ? `Customer Payments (Pay Bill / ${PROVIDER_LABELS[paymentIntegration.config.provider] || paymentIntegration.config.provider})`
+  const paymentsSectionTitle = decryptedConfig?.provider
+    ? `Customer Payments (Pay Bill / ${PROVIDER_LABELS[decryptedConfig.provider] || decryptedConfig.provider})`
     : 'Customer Payments (Pay Bill)';
 
   res.setHeader('Content-Type', 'application/pdf');

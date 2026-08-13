@@ -2,15 +2,12 @@ const { supabaseAdmin } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 const { logAction } = require('../utils/auditLog');
 const { sendPrintJob } = require('../utils/printNodeAdapter');
+const { UAE_VAT_RATE, calculateVatInclusive } = require('../utils/vat');
+const { decryptConfig } = require('../utils/credentialEncryption');
 
-// Same UAE VAT convention already used in exportController/publicController -
-// menu prices are VAT-inclusive, so VAT is derived from the gross amount
-// rather than added on top.
-const UAE_VAT_RATE = 0.05;
 function vatBreakdown(grossAmount) {
-  const vat = Math.round((grossAmount - grossAmount / (1 + UAE_VAT_RATE)) * 100) / 100;
-  const net = Math.round((grossAmount - vat) * 100) / 100;
-  return { net, vat };
+  const { subtotalExVat, vatAmount } = calculateVatInclusive(grossAmount);
+  return { net: subtotalExVat, vat: vatAmount };
 }
 
 // @route GET /api/businesses/:businessId/tables
@@ -146,7 +143,7 @@ const printTableReceipt = asyncHandler(async (req, res) => {
 
   let printResult = { success: false, error: 'No printer connected' };
   if (printerIntegration) {
-    printResult = await sendPrintJob(printerIntegration.config, receiptText);
+    printResult = await sendPrintJob(decryptConfig(printerIntegration.config), receiptText);
   }
 
   // Always return the formatted text too - if there's no printer
