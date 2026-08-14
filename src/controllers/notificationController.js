@@ -1,7 +1,7 @@
 const asyncHandler = require('../utils/asyncHandler');
 const { supabaseAdmin } = require('../config/supabaseClient');
 
-const SECTIONS = ['orders', 'requests', 'payments'];
+const SECTIONS = ['orders', 'requests', 'payments', 'kitchen', 'housekeeping', 'front-desk'];
 
 // Defaults to "the beginning of time" for a section nobody's ever opened -
 // everything currently pending counts, which is the correct behavior for
@@ -19,11 +19,14 @@ async function getLastViewed(businessId, section) {
 // @route GET /api/businesses/:businessId/notifications/counts
 const getNotificationCounts = asyncHandler(async (req, res) => {
   const businessId = req.params.businessId;
-  const [ordersViewed, requestsViewed, paymentsViewed] = await Promise.all(
+  const [ordersViewed, requestsViewed, paymentsViewed, kitchenViewed, housekeepingViewed, frontDeskViewed] = await Promise.all(
     SECTIONS.map((s) => getLastViewed(businessId, s))
   );
 
-  const [ordersCount, callWaiterCount, cashPendingCount, claimsCount, paymentsCount] = await Promise.all([
+  const [
+    ordersCount, callWaiterCount, cashPendingCount, claimsCount, paymentsCount,
+    kitchenCount, housekeepingTaskCount, maintenanceTicketCount, housekeepingRequestCount, frontDeskRequestCount,
+  ] = await Promise.all([
     supabaseAdmin.from('orders').select('id', { count: 'exact', head: true })
       .eq('business_id', businessId).eq('request_type', 'order').eq('status', 'pending')
       .gte('created_at', ordersViewed),
@@ -44,12 +47,44 @@ const getNotificationCounts = asyncHandler(async (req, res) => {
     supabaseAdmin.from('payments').select('id', { count: 'exact', head: true })
       .eq('business_id', businessId).eq('status', 'completed')
       .gte('created_at', paymentsViewed),
+    // Kitchen deliberately mirrors the same "new pending order" signal
+    // Orders already uses - same underlying event, just watched from a
+    // different screen.
+    supabaseAdmin.from('orders').select('id', { count: 'exact', head: true })
+      .eq('business_id', businessId).eq('request_type', 'order').eq('status', 'pending')
+      .gte('created_at', kitchenViewed),
+    supabaseAdmin.from('housekeeping_tasks').select('id', { count: 'exact', head: true })
+      .eq('business_id', businessId).in('status', ['pending', 'in_progress'])
+      .gte('created_at', housekeepingViewed),
+    // Maintenance tickets land on the same Housekeeping screen (a
+    // second tab there, not a separate nav item) - same badge covers
+    // both, matching what that screen actually shows.
+    supabaseAdmin.from('maintenance_tickets').select('id', { count: 'exact', head: true })
+      .eq('business_id', businessId).in('status', ['open', 'in_progress'])
+      .gte('created_at', housekeepingViewed),
+    // A general-destination custom request explicitly routed to
+    // Housekeeping (as opposed to the dedicated housekeeping_task
+    // destination, which is counted above) still needs to count here too.
+    supabaseAdmin.from('orders').select('id', { count: 'exact', head: true })
+      .eq('business_id', businessId).eq('request_type', 'custom').eq('target_section', 'housekeeping').neq('status', 'completed')
+      .gte('created_at', housekeepingViewed),
+    // Front Desk's badge matches exactly what a front-desk-assigned
+    // staff member actually sees in Requests: their own section, plus
+    // anything left unrestricted (target_section null), same visibility
+    // rule listRequests already enforces.
+    supabaseAdmin.from('orders').select('id', { count: 'exact', head: true })
+      .eq('business_id', businessId).neq('request_type', 'order').neq('status', 'completed')
+      .or('target_section.is.null,target_section.eq.front-desk')
+      .gte('created_at', frontDeskViewed),
   ]);
 
   res.json({
     orders: ordersCount.count || 0,
     requests: (callWaiterCount.count || 0) + (cashPendingCount.count || 0) + (claimsCount.count || 0),
     payments: paymentsCount.count || 0,
+    kitchen: kitchenCount.count || 0,
+    housekeeping: (housekeepingTaskCount.count || 0) + (maintenanceTicketCount.count || 0) + (housekeepingRequestCount.count || 0),
+    'front-desk': frontDeskRequestCount.count || 0,
   });
 });
 
