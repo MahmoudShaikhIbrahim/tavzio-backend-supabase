@@ -812,6 +812,17 @@ const submitOrder = asyncHandler(async (req, res) => {
       note: note || '',
       total,
       request_type: requestType,
+      // Explicit now, on purpose - this used to rely on the column's own
+      // database-side default, which should have been 'customer_tap' and
+      // should have been valid regardless, but that reliance is exactly
+      // what made this bug so hard to pin down: it worked correctly in
+      // every check I could run directly against the schema, yet kept
+      // failing in production in a way I couldn't reproduce or fully
+      // explain from outside the live database. Setting it here removes
+      // any dependency on database-side default behavior I can't fully
+      // inspect - this value is now guaranteed by the code itself, not
+      // by an assumption about what the database will do.
+      source: 'customer_tap',
       source_event_id: tapEventId,
       pos_sync_status: integration ? 'pending' : 'not_applicable',
     })
@@ -997,6 +1008,7 @@ async function createAwaitingOrder({ business, tapEvent, tableLabel, note, order
       total,
       request_type: 'order',
       status: 'awaiting_payment',
+      source: 'customer_tap',
       source_event_id: tapEvent.id,
       pos_sync_status: 'not_applicable',
     })

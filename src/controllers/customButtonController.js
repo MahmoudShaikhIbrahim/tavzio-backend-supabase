@@ -190,6 +190,9 @@ const submitCustomButtonRequest = asyncHandler(async (req, res) => {
       request_type: 'custom',
       custom_request_label: button.label,
       target_section: button.target_section,
+      // Explicit, not relying on the column default - same fix, same
+      // reasoning, as publicController.js's submitOrder.
+      source: 'customer_tap',
       source_event_id: tapEventId,
       pos_sync_status: 'not_applicable',
     })

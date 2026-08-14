@@ -283,6 +283,7 @@ const placeStaffOrder = asyncHandler(async (req, res) => {
       table_label: card.label || '',
       note: note || '',
       total,
+      source: 'staff_pos',
       placed_by_staff_id: req.user.id,
     })
     .select()

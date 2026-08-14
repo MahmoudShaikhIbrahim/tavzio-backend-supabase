@@ -28,10 +28,23 @@ alter table public.orders add column if not exists custom_request_label text;
 -- link buttons already exist, matching their old prominent position.
 insert into public.custom_buttons (business_id, label, icon, url, button_type, sort_order, enabled)
 select id, 'Call a Waiter', 'bell', '', 'notification', -20, true
-from public.businesses
-where coalesce((features->'ordering'->>'callWaiter')::boolean, false) = true;
+from public.businesses b
+where coalesce((features->'ordering'->>'callWaiter')::boolean, false) = true
+  -- Idempotency guard - without this, re-running this migration (which
+  -- has genuinely happened) silently duplicates the button every time,
+  -- since a plain INSERT...SELECT has no built-in protection against
+  -- running twice. This is exactly the bug that produced a real
+  -- duplicate "Request the Bill" row in production.
+  and not exists (
+    select 1 from public.custom_buttons cb
+    where cb.business_id = b.id and cb.label = 'Call a Waiter' and cb.button_type = 'notification'
+  );
 
 insert into public.custom_buttons (business_id, label, icon, url, button_type, sort_order, enabled)
 select id, 'Request the Bill', 'receipt', '', 'notification', -10, true
-from public.businesses
-where coalesce((features->'ordering'->>'requestBill')::boolean, false) = true;
+from public.businesses b
+where coalesce((features->'ordering'->>'requestBill')::boolean, false) = true
+  and not exists (
+    select 1 from public.custom_buttons cb
+    where cb.business_id = b.id and cb.label = 'Request the Bill' and cb.button_type = 'notification'
+  );
