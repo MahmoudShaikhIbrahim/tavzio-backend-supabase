@@ -36,7 +36,7 @@ const listOrders = asyncHandler(async (req, res) => {
 const listRequests = asyncHandler(async (req, res) => {
   const { data, error } = await req.supabase
     .from('orders')
-    .select('id, table_label, request_type, status, created_at')
+    .select('id, table_label, request_type, custom_request_label, target_section, status, created_at')
     .eq('business_id', req.params.businessId)
     .neq('request_type', 'order')
     .eq('voided', false)
@@ -44,7 +44,20 @@ const listRequests = asyncHandler(async (req, res) => {
     .limit(50);
 
   if (error) return res.status(400).json({ message: error.message });
-  res.json(data);
+
+  // Section filtering happens here, not in the query itself, since a
+  // request with no target_section (NULL) must stay visible to
+  // everyone with Requests access - that's the deliberate backward-
+  // compatible default (see migration 0057), and it's simpler to
+  // express as "keep if unrestricted OR section matches" in code than
+  // in a single SQL clause covering both a NULL request and a NULL
+  // staff restriction correctly.
+  const assignedSections = req.user.assigned_sections;
+  const visible = Array.isArray(assignedSections)
+    ? (data || []).filter((r) => !r.target_section || assignedSections.includes(r.target_section))
+    : (data || []); // unrestricted staff (or owner) sees everything
+
+  res.json(visible);
 });
 
 // @route PATCH /api/businesses/:businessId/requests/:requestId/dismiss

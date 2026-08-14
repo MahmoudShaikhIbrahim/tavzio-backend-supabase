@@ -2,6 +2,7 @@ const express = require('express');
 const { submitLead } = require('../controllers/leadController');
 const { getGuestPortal, submitGuestRequest, submitGuestOrder, getMyRequests } = require('../controllers/hotelGuestPortalController');
 const { listPublicOutlets } = require('../controllers/hotelOutletsController');
+const { submitCustomButtonRequest } = require('../controllers/customButtonController');
 const { createFolioPaymentSession, confirmFolioPayment } = require('../controllers/hotelPaymentController');
 const {
   resolveCardTap,
@@ -50,6 +51,7 @@ router.post('/business/:slug/bill/pay', payBill);
 router.post('/business/:slug/bill/pay-session', createPaySession);
 router.post('/business/:slug/bill/confirm', confirmPaySession);
 router.post('/business/:slug/bill/cancel', cancelBillPaySession);
+router.post('/business/:slug/custom-buttons/:buttonId/request', submitCustomButtonRequest);
 
 router.post('/leads', submitLead);
 
