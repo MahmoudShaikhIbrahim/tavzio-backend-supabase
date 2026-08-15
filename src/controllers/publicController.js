@@ -713,6 +713,39 @@ const submitOrder = asyncHandler(async (req, res) => {
     tableLabel = card?.label || '';
   }
 
+  // The actual gap this closes: a guest's OWN self-service tap-order on
+  // their room's stand was never linked to their room bill at all -
+  // only a staff member manually charging via POS Terminal was. Same
+  // room -> checked-in reservation -> primary open folio resolution
+  // lookupFolioByRoom already uses, just triggered by the tap itself
+  // rather than a staff member typing in a room number. Any failure at
+  // any step here (no room link, no checked-in guest, no open folio)
+  // falls through to the normal standalone-order behavior untouched -
+  // this never changes anything for a restaurant or a non-room-linked
+  // stand.
+  let autoChargeFolioId = null;
+  if (requestType === 'order' && tapEvent.card_id) {
+    const { data: room } = await supabaseAdmin.from('hotel_rooms').select('id').eq('card_id', tapEvent.card_id).maybeSingle();
+    if (room) {
+      const { data: reservation } = await supabaseAdmin
+        .from('hotel_reservations')
+        .select('id')
+        .eq('room_id', room.id)
+        .eq('status', 'checked_in')
+        .maybeSingle();
+      if (reservation) {
+        const { data: folio } = await supabaseAdmin
+          .from('hotel_folios')
+          .select('id')
+          .eq('reservation_id', reservation.id)
+          .eq('is_primary', true)
+          .eq('status', 'open')
+          .maybeSingle();
+        autoChargeFolioId = folio?.id || null;
+      }
+    }
+  }
+
   let orderItemRows = [];
   let total = 0;
 
@@ -825,6 +858,12 @@ const submitOrder = asyncHandler(async (req, res) => {
       source: 'customer_tap',
       source_event_id: tapEventId,
       pos_sync_status: integration ? 'pending' : 'not_applicable',
+      charged_to_folio_id: autoChargeFolioId,
+      // Only actually overrides payment_method when auto-charging to a
+      // folio - omitted (not sent as an explicit undefined) for every
+      // other order, so the column's existing normal behavior for a
+      // standalone order is completely untouched.
+      ...(autoChargeFolioId ? { payment_method: 'other' } : {}),
     })
     .select()
     .single();
@@ -835,6 +874,20 @@ const submitOrder = asyncHandler(async (req, res) => {
       .from('order_items')
       .insert(orderItemRows.map((i) => ({ ...i, order_id: order.id })));
     if (itemsError) return res.status(400).json({ message: itemsError.message });
+  }
+
+  // Same folio_charges pattern createPosOrder already uses for a
+  // staff-initiated charge-to-room - this is what actually makes the
+  // charge show up on the guest's bill, not just the order existing
+  // with a folio id attached to it.
+  if (autoChargeFolioId) {
+    await supabaseAdmin.from('hotel_folio_charges').insert({
+      folio_id: autoChargeFolioId,
+      description: `${tableLabel || 'Room'} - F&B order (${orderItemRows.length} item${orderItemRows.length === 1 ? '' : 's'})`,
+      amount_aed: total,
+      charge_type: 'fnb',
+      source_order_id: order.id,
+    });
   }
 
   // Deduct stock now that the order genuinely exists - the earlier check
