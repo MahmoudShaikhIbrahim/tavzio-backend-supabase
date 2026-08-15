@@ -725,12 +725,19 @@ const submitOrder = asyncHandler(async (req, res) => {
   // stand.
   let autoChargeFolioId = null;
   if (requestType === 'order' && tapEvent.card_id) {
-    const { data: room } = await supabaseAdmin.from('hotel_rooms').select('id').eq('card_id', tapEvent.card_id).maybeSingle();
-    if (room) {
+    // Same real bug fixed here as resolveRoomFromCard in
+    // customButtonController.js - the actual link is cards.room_id, not
+    // hotel_rooms.card_id (which was never set by anything). This means
+    // auto-charging to the room's folio could never have actually
+    // worked before this fix either, on any stand, regardless of
+    // whether it looked connected in the Rooms tab.
+    const { data: card } = await supabaseAdmin.from('cards').select('room_id').eq('id', tapEvent.card_id).maybeSingle();
+    const roomIdForOrder = card?.room_id || null;
+    if (roomIdForOrder) {
       const { data: reservation } = await supabaseAdmin
         .from('hotel_reservations')
         .select('id')
-        .eq('room_id', room.id)
+        .eq('room_id', roomIdForOrder)
         .eq('status', 'checked_in')
         .maybeSingle();
       if (reservation) {

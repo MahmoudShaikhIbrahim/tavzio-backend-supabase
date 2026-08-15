@@ -94,10 +94,17 @@ const deleteCustomButton = asyncHandler(async (req, res) => {
 // same room-stand link the Front Desk RoomsTab already manages. Shared
 // by both destination branches below that need a real room, rather than
 // duplicated.
+// Resolves the room a tap's card is currently linked to, if any - real
+// bug found and fixed here: this used to query hotel_rooms.card_id, a
+// relationship that was never actually set by any code path in this
+// system. The real link (see updateCard/cardController.js) is stored
+// the other direction - cards.room_id, on the card itself. This means
+// Housekeeping/Maintenance routing could never have worked before this
+// fix, regardless of whether a stand was actually connected to a room.
 async function resolveRoomFromCard(cardId) {
   if (!cardId) return null;
-  const { data: room } = await supabaseAdmin.from('hotel_rooms').select('id').eq('card_id', cardId).maybeSingle();
-  return room?.id || null;
+  const { data: card } = await supabaseAdmin.from('cards').select('room_id').eq('id', cardId).maybeSingle();
+  return card?.room_id || null;
 }
 
 // @route POST /api/public/business/:slug/custom-buttons/:buttonId/request
