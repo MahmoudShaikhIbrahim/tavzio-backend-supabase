@@ -29,6 +29,20 @@ const createRoom = asyncHandler(async (req, res) => {
 
   if (cardId) {
     await req.supabase.from('cards').update({ room_id: data.id }).eq('id', cardId).eq('business_id', req.params.businessId);
+  } else {
+    // Confirmed decision: naming a stand exactly the same as a room
+    // (e.g. a card labeled "Room 1" and a room numbered "Room 1")
+    // should connect them automatically, same instinct as labeling a
+    // restaurant card "Table 1" - no separate manual linking step
+    // required when the names already say the same thing. Exact match
+    // only, and only a card that isn't already linked to something
+    // else - never silently steals a stand from another room.
+    await req.supabase
+      .from('cards')
+      .update({ room_id: data.id })
+      .eq('business_id', req.params.businessId)
+      .ilike('label', roomNumber)
+      .is('room_id', null);
   }
 
   res.status(201).json(data);

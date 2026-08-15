@@ -56,6 +56,45 @@ const updateCard = asyncHandler(async (req, res) => {
     .single();
 
   if (error || !data) return res.status(404).json({ message: 'Card not found' });
+
+  // Confirmed decision: labeling a card the same as an existing room
+  // (e.g. naming this stand "Room 1") connects them automatically, same
+  // instinct as a restaurant card labeled "Table 1" - no separate
+  // manual step required when the label already says which room this
+  // is. Only when this update actually touched the label, only an
+  // exact match, and only if the card doesn't already have a different
+  // room explicitly linked (roomId wasn't itself part of this same
+  // request, and it isn't already linked to something else) - this
+  // must never silently override a deliberate, different link.
+  if (label !== undefined && roomId === undefined && !data.room_id) {
+    const { data: matchingRoom } = await req.supabase
+      .from('hotel_rooms')
+      .select('id')
+      .eq('business_id', req.params.businessId)
+      .ilike('room_number', label)
+      .maybeSingle();
+    if (matchingRoom) {
+      // Never silently give a room a second stand - if one's already
+      // linked, this is almost certainly a naming coincidence or a
+      // mistake, not an intentional second connection, and should be
+      // handled explicitly rather than auto-linked.
+      const { data: alreadyLinkedCard } = await req.supabase
+        .from('cards')
+        .select('id')
+        .eq('room_id', matchingRoom.id)
+        .maybeSingle();
+      if (!alreadyLinkedCard) {
+        const { data: relinked } = await req.supabase
+          .from('cards')
+          .update({ room_id: matchingRoom.id })
+          .eq('id', data.id)
+          .select()
+          .single();
+        if (relinked) return res.json(relinked);
+      }
+    }
+  }
+
   res.json(data);
 });
 
