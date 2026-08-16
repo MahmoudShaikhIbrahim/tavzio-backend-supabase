@@ -40,12 +40,23 @@ app.use(
 );
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
-const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 300 });
+// Real fix, not just a bigger number: /api/auth and /api/businesses used
+// to share ONE 300-request budget per IP. That's how a heavy dashboard
+// session (lots of business API traffic - normal, expected usage) could
+// exhaust the SAME budget login itself depends on, locking someone out
+// of their own account with no relation to actual login attempts.
+// Separate budgets now, so business API traffic can never starve out
+// login again. 600 for business traffic reflects what a real multi-page
+// dashboard with 15s notification polling plus realtime actually uses
+// over 15 minutes, not the original number sized before most of this
+// app's current page count existed.
+const authApiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 300 });
+const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 600 });
 const publicLimiter = rateLimit({ windowMs: 60 * 1000, max: 60 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
 
-app.use('/api/auth', apiLimiter, authRoutes);
+app.use('/api/auth', authApiLimiter, authRoutes);
 app.use('/api/businesses', apiLimiter, businessRoutes);
 app.use('/api/public', publicLimiter, publicRoutes);
 app.use('/api/messages', apiLimiter, messagesRoutes);

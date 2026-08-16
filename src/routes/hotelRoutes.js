@@ -16,6 +16,7 @@ const { getCurrentBusinessDate, getNightAuditPreview, runNightAudit, listNightAu
 const { listHousekeepingTasks, createHousekeepingTask, updateHousekeepingTask, getHousekeepingPerformance } = require('../controllers/housekeepingController');
 const { listMaintenanceTickets, createMaintenanceTicket, updateMaintenanceTicket, getMaintenancePerformance, listGuestRequests, updateGuestRequest } = require('../controllers/maintenanceController');
 const { listOutlets, createOutlet, updateOutlet, deleteOutlet, setOutletItems } = require('../controllers/hotelOutletsController');
+const { listGuestServices, createGuestService, updateGuestService, deleteGuestService } = require('../controllers/hotelGuestPortalController');
 const { listBookingGroups, createBookingGroup, updateBookingGroup, deleteBookingGroup } = require('../controllers/hotelBookingGroupsController');
 const { listCityLedgerEntries, settleCityLedgerEntry } = require('../controllers/hotelCityLedgerController');
 const {
@@ -94,6 +95,10 @@ router.get('/guest-requests', listGuestRequests);
 router.patch('/guest-requests/:requestId', updateGuestRequest);
 
 router.get('/outlets', listOutlets);
+router.get('/guest-services', listGuestServices);
+router.post('/guest-services', createGuestService);
+router.patch('/guest-services/:serviceId', updateGuestService);
+router.delete('/guest-services/:serviceId', deleteGuestService);
 router.post('/outlets', createOutlet);
 router.patch('/outlets/:outletId', updateOutlet);
 router.delete('/outlets/:outletId', deleteOutlet);

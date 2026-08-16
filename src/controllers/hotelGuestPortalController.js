@@ -2,6 +2,21 @@ const asyncHandler = require('../utils/asyncHandler');
 const { supabaseAdmin } = require('../config/supabaseClient');
 const { calculateVatInclusive } = require('../utils/vat');
 
+// Fallback only - used when a business has zero hotel_guest_services rows
+// (a brand-new hotel that hasn't been seeded, or one created before this
+// feature existed and never got migrated). Matches migration 0072's own
+// seed values exactly, so the guest-facing list never silently changes
+// depending on which path served it.
+const DEFAULT_GUEST_SERVICES = [
+  { id: 'default-towels', routingType: 'towels', label: 'Extra towels', options: [] },
+  { id: 'default-turndown', routingType: 'turndown', label: 'Turndown service', options: [] },
+  { id: 'default-housekeeping', routingType: 'housekeeping', label: 'Housekeeping', options: [] },
+  { id: 'default-maintenance', routingType: 'maintenance', label: 'Report an issue', options: ['Air Conditioning', 'Lights', 'Bathroom', 'Door', 'TV', 'Electricity', 'Plumbing', 'Other'] },
+  { id: 'default-laundry', routingType: 'laundry', label: 'Laundry pickup', options: ['Express', 'Same Day', 'Standard'] },
+  { id: 'default-transportation', routingType: 'transportation', label: 'Transportation', options: ['Taxi', 'Airport Transfer', 'Hotel Car'] },
+  { id: 'default-pool', routingType: 'pool', label: 'Pool service', options: ['Request Towel', 'Sunbed Assistance', 'Other'] },
+];
+
 // Shared context resolver - every guest-portal endpoint needs the same
 // business -> room -> active reservation chain, verified fresh every
 // time rather than trusted from the client.
@@ -55,6 +70,22 @@ const getGuestPortal = asyncHandler(async (req, res) => {
     }
   }
 
+  // Real fix for a genuine gap: this list used to be hardcoded in the
+  // frontend, identical for every hotel and impossible for an owner to
+  // touch. Falls back to the same 7 defaults inline (not persisted) if
+  // this business genuinely has zero rows yet - a brand-new hotel still
+  // sees a sensible starting list, not an empty page, without needing a
+  // separate seeding step at business-creation time.
+  const { data: services } = await supabaseAdmin
+    .from('hotel_guest_services')
+    .select('id, routing_type, label, options')
+    .eq('business_id', business.id)
+    .eq('enabled', true)
+    .order('sort_order');
+  const guestServices = (services && services.length > 0) ? services.map((s) => ({
+    id: s.id, routingType: s.routing_type, label: s.label, options: s.options || [],
+  })) : DEFAULT_GUEST_SERVICES;
+
   res.json({
     business: { name: business.name, slug: business.slug, logoUrl: business.logo_url, links: business.links, theme: business.theme },
     room: { id: room.id, roomNumber: room.room_number, roomType: room.room_type },
@@ -66,6 +97,7 @@ const getGuestPortal = asyncHandler(async (req, res) => {
     // bill, same way the restaurant Pay Bill flow already does.
     vatBreakdown: folioBalance !== null ? calculateVatInclusive(folioBalance) : null,
     charges,
+    guestServices,
   });
 });
 
@@ -254,4 +286,85 @@ const getMyRequests = asyncHandler(async (req, res) => {
   res.json(combined);
 });
 
-module.exports = { getGuestPortal, submitGuestRequest, submitGuestOrder, getMyRequests };
+// --- Owner-facing management of the guest portal's service list ---
+// (routes live under the authenticated /hotel/guest-services prefix,
+// not /public - separate from everything above this line)
+
+const ROUTING_TYPES = ['towels', 'turndown', 'housekeeping', 'maintenance', 'taxi', 'laundry', 'pool', 'transportation', 'other'];
+
+const listGuestServices = asyncHandler(async (req, res) => {
+  const { data, error } = await req.supabase
+    .from('hotel_guest_services')
+    .select('*')
+    .eq('business_id', req.params.businessId)
+    .order('sort_order');
+  if (error) return res.status(400).json({ message: error.message });
+
+  if (data && data.length > 0) return res.json(data);
+
+  // Materializes the defaults into real rows the first time this is
+  // opened for a business that has none yet - returning fake string ids
+  // instead would mean the very first edit anyone makes fails with "not
+  // found", since there'd be no real row behind it to update.
+  const { data: seeded, error: seedError } = await req.supabase
+    .from('hotel_guest_services')
+    .insert(DEFAULT_GUEST_SERVICES.map((d, i) => ({
+      business_id: req.params.businessId, routing_type: d.routingType, label: d.label, options: d.options, sort_order: i,
+    })))
+    .select();
+  if (seedError) return res.status(400).json({ message: seedError.message });
+  res.json(seeded);
+});
+
+const createGuestService = asyncHandler(async (req, res) => {
+  const { routingType, label, options = [], sortOrder = 0 } = req.body;
+  if (!routingType || !label) return res.status(400).json({ message: 'routingType and label are required' });
+  if (!ROUTING_TYPES.includes(routingType)) return res.status(400).json({ message: 'Invalid routingType' });
+
+  const { data, error } = await req.supabase
+    .from('hotel_guest_services')
+    .insert({ business_id: req.params.businessId, routing_type: routingType, label, options, sort_order: sortOrder })
+    .select()
+    .single();
+  if (error) return res.status(400).json({ message: error.message });
+  res.status(201).json(data);
+});
+
+const updateGuestService = asyncHandler(async (req, res) => {
+  const { label, options, enabled, sortOrder, routingType } = req.body;
+  const update = {};
+  if (label !== undefined) update.label = label;
+  if (options !== undefined) update.options = options;
+  if (enabled !== undefined) update.enabled = enabled;
+  if (sortOrder !== undefined) update.sort_order = sortOrder;
+  if (routingType !== undefined) {
+    if (!ROUTING_TYPES.includes(routingType)) return res.status(400).json({ message: 'Invalid routingType' });
+    update.routing_type = routingType;
+  }
+
+  const { data, error } = await req.supabase
+    .from('hotel_guest_services')
+    .update(update)
+    .eq('id', req.params.serviceId)
+    .eq('business_id', req.params.businessId)
+    .select()
+    .single();
+  if (error || !data) return res.status(404).json({ message: 'Service not found' });
+  res.json(data);
+});
+
+const deleteGuestService = asyncHandler(async (req, res) => {
+  const { error, count } = await req.supabase
+    .from('hotel_guest_services')
+    .delete({ count: 'exact' })
+    .eq('id', req.params.serviceId)
+    .eq('business_id', req.params.businessId);
+  if (error) return res.status(400).json({ message: error.message });
+  if (!count) return res.status(404).json({ message: 'Service not found' });
+  res.json({ message: 'Service removed' });
+});
+
+module.exports = {
+  getGuestPortal, submitGuestRequest, submitGuestOrder, getMyRequests,
+  listGuestServices, createGuestService, updateGuestService, deleteGuestService,
+};
