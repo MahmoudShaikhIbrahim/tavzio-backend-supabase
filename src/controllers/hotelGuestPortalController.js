@@ -86,6 +86,18 @@ const getGuestPortal = asyncHandler(async (req, res) => {
     id: s.id, routingType: s.routing_type, label: s.label, options: s.options || [],
   })) : DEFAULT_GUEST_SERVICES;
 
+  // Real fix: a hotel room card never routes to the general LandingPage
+  // at all (resolveCardTap sends it straight to this room-scoped portal
+  // instead) - so "Landing Page Buttons" custom buttons, configured
+  // under that same name in Settings, were being fetched by a page a
+  // hotel guest can never actually reach. Same buttons, same page now.
+  const { data: customButtons } = await supabaseAdmin
+    .from('custom_buttons')
+    .select('id, label, icon, image_url, url, button_type, notification_destination, target_section, parent_button_id')
+    .eq('business_id', business.id)
+    .eq('enabled', true)
+    .order('sort_order');
+
   res.json({
     business: { name: business.name, slug: business.slug, logoUrl: business.logo_url, links: business.links, theme: business.theme },
     room: { id: room.id, roomNumber: room.room_number, roomType: room.room_type },
@@ -98,6 +110,7 @@ const getGuestPortal = asyncHandler(async (req, res) => {
     vatBreakdown: folioBalance !== null ? calculateVatInclusive(folioBalance) : null,
     charges,
     guestServices,
+    customButtons: customButtons || [],
   });
 });
 
