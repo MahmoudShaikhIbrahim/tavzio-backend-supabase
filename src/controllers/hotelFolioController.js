@@ -60,6 +60,27 @@ const addCharge = asyncHandler(async (req, res) => {
   res.status(201).json(data);
 });
 
+// The actual "undo" a manually-added charge needed - a payment,
+// deposit, or refund is real money that already moved and stays a
+// permanent record, but a charge that was added by mistake (wrong
+// amount, wrong room, changed their mind) should be reversible while
+// the folio is still open, not a permanent commitment the moment it's
+// typed in.
+const deleteCharge = asyncHandler(async (req, res) => {
+  const { data: folio } = await req.supabase.from('hotel_folios').select('status').eq('id', req.params.folioId).eq('business_id', req.params.businessId).single();
+  if (!folio) return res.status(404).json({ message: 'Folio not found' });
+  if (folio.status === 'closed') return res.status(400).json({ message: 'This folio is closed' });
+
+  const { data: charge } = await req.supabase.from('hotel_folio_charges').select('*').eq('id', req.params.chargeId).eq('folio_id', req.params.folioId).maybeSingle();
+  if (!charge) return res.status(404).json({ message: 'Charge not found' });
+
+  const { error } = await req.supabase.from('hotel_folio_charges').delete().eq('id', req.params.chargeId);
+  if (error) return res.status(400).json({ message: error.message });
+
+  await logAction({ businessId: req.params.businessId, actor: req.user, action: 'folio_charge_deleted', targetId: req.params.chargeId, details: { folioId: req.params.folioId, description: charge.description, amountAed: charge.amount_aed } });
+  res.json({ message: 'Charge deleted' });
+});
+
 const recordPayment = asyncHandler(async (req, res) => {
   const { amountAed, description = 'Payment' } = req.body;
   if (!amountAed || amountAed <= 0) return res.status(400).json({ message: 'amountAed must be a positive number' });
@@ -237,6 +258,6 @@ const getTourismDirhamReport = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  getFolio, getFoliosByReservation, addCharge, recordPayment,
+  getFolio, getFoliosByReservation, addCharge, deleteCharge, recordPayment,
   recordDeposit, recordRefund, recordAdjustment, splitFolio, transferCharge, lookupFolioByRoom, getTourismDirhamReport,
 };

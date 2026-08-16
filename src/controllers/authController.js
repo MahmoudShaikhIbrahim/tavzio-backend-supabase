@@ -167,6 +167,29 @@ const updateMyTheme = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
+// @route PATCH /api/auth/language
+// Body: { language: 'en' | 'ar' | 'ru' | 'es' | 'hi' | 'ur' | 'tl' | 'zh' | 'fr' }
+// Scoped to the caller's own account only - nobody can set anyone else's.
+// Same 9 languages as the customer-facing NFC interface, so an owner or
+// staff member gets a language switcher they already recognize.
+const updateMyLanguage = asyncHandler(async (req, res) => {
+  const { language } = req.body;
+  const VALID_LANGUAGES = ['en', 'ar', 'ru', 'es', 'hi', 'ur', 'tl', 'zh', 'fr'];
+  if (!VALID_LANGUAGES.includes(language)) {
+    return res.status(400).json({ message: 'Invalid language' });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('profiles')
+    .update({ preferred_language: language })
+    .eq('id', req.user.id)
+    .select('id, name, role, business_id, is_active, theme_preference, preferred_language')
+    .single();
+
+  if (error) return res.status(400).json({ message: error.message });
+  res.json(data);
+});
+
 // @route GET /api/auth/confirm-device/:pendingId
 // Opened from the confirmation email link, on the same device that
 // triggered it. Marks the device trusted for next time and completes login.
@@ -255,4 +278,4 @@ const changePassword = asyncHandler(async (req, res) => {
   res.json({ message: 'Password updated' });
 });
 
-module.exports = { register, login, refresh, me, updateMyTheme, confirmDevice, changePassword };
+module.exports = { register, login, refresh, me, updateMyTheme, updateMyLanguage, confirmDevice, changePassword };

@@ -3,7 +3,7 @@ const {
   listOrganizations, createOrganization, setBusinessOrganization, inviteOrgOwner,
   requireOrgOwner, getMyOrganization,
   listOrgMenuCategories, createOrgMenuCategory, createOrgMenuItem, updateOrgMenuItem, deleteOrgMenuItem,
-  publishMenuToLocations, getConsolidatedReport,
+  publishMenuToLocations, getConsolidatedReport, getHotelConsolidatedReport,
 } = require('../controllers/organizationController');
 const { protect, authorize } = require('../middleware/auth');
 
@@ -26,5 +26,6 @@ router.patch('/menu/items/:itemId', authorize('org_owner', 'super_admin'), requi
 router.delete('/menu/items/:itemId', authorize('org_owner', 'super_admin'), requireOrgOwner, deleteOrgMenuItem);
 router.post('/menu/publish', authorize('org_owner', 'super_admin'), requireOrgOwner, publishMenuToLocations);
 router.get('/report', authorize('org_owner', 'super_admin'), requireOrgOwner, getConsolidatedReport);
+router.get('/report/hotel', authorize('org_owner', 'super_admin'), requireOrgOwner, getHotelConsolidatedReport);
 
 module.exports = router;

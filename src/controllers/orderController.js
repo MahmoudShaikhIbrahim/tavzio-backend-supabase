@@ -12,7 +12,12 @@ const { decryptConfig } = require('../utils/credentialEncryption');
 const listOrders = asyncHandler(async (req, res) => {
   let query = req.supabase
     .from('orders')
-    .select('*, order_items(*)')
+    // Station joined live from the current menu (not snapshotted at order
+    // time, unlike item_name/price) - deliberately: if an owner moves
+    // "Burger" from Grill to a new station, every ticket should route to
+    // where it's actually being made today, not wherever it was made when
+    // the order happened to be placed.
+    .select('*, order_items(*, menu_items(station))')
     .eq('business_id', req.params.businessId)
     .eq('request_type', 'order')
     // A pay-before-order order sitting in awaiting_payment hasn't been
@@ -26,7 +31,14 @@ const listOrders = asyncHandler(async (req, res) => {
 
   const { data, error } = await query;
   if (error) return res.status(400).json({ message: error.message });
-  res.json(data);
+
+  // Flatten the joined station onto each item so the frontend doesn't
+  // need to know about the nested menu_items relation at all.
+  const orders = (data || []).map((o) => ({
+    ...o,
+    order_items: (o.order_items || []).map((i) => ({ ...i, station: i.menu_items?.station || '', menu_items: undefined })),
+  }));
+  res.json(orders);
 });
 
 // @route GET /api/businesses/:businessId/requests
@@ -81,7 +93,7 @@ const dismissRequest = asyncHandler(async (req, res) => {
 // Body: { status: 'pending'|'ready'|'completed'|'cancelled' }
 const updateOrderStatus = asyncHandler(async (req, res) => {
   const { status } = req.body;
-  const allowed = ['pending', 'ready', 'completed', 'cancelled'];
+  const allowed = ['pending', 'preparing', 'ready', 'completed', 'cancelled'];
   if (!allowed.includes(status)) {
     return res.status(400).json({ message: 'Invalid status' });
   }
@@ -90,17 +102,27 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   // Fires the "Table X's order is ready" notification on the Orders page
   // - reset every time an order goes ready, including a second time if
   // it somehow moves back to pending and ready again.
-  if (status === 'ready') update.ready_ack = false;
+  if (status === 'ready') { update.ready_ack = false; update.ready_at = new Date().toISOString(); }
+  // Timing captured for the kitchen performance report - only stamped
+  // the first time a ticket starts, never overwritten by a later status
+  // change back through 'preparing' (an order shouldn't look like it
+  // "started" twice just because it was corrected).
+  if (status === 'preparing') update.prep_started_at = new Date().toISOString();
 
-  const { data, error } = await req.supabase
-    .from('orders')
-    .update(update)
-    .eq('id', req.params.orderId)
-    .eq('business_id', req.params.businessId)
-    .select()
-    .single();
+  let query = req.supabase.from('orders').update(update).eq('id', req.params.orderId).eq('business_id', req.params.businessId);
+  if (status === 'preparing') query = query.is('prep_started_at', null);
+  const { data, error } = await query.select().single();
 
-  if (error || !data) return res.status(404).json({ message: 'Order not found' });
+  if (error || !data) {
+    // The .is('prep_started_at', null) guard above means "no row updated"
+    // can also just mean this ticket already started - not a real error,
+    // so fetch and return it as-is rather than reporting a false failure.
+    if (status === 'preparing') {
+      const { data: existing } = await req.supabase.from('orders').select('*').eq('id', req.params.orderId).eq('business_id', req.params.businessId).single();
+      if (existing) return res.json(existing);
+    }
+    return res.status(404).json({ message: 'Order not found' });
+  }
   res.json(data);
 });
 

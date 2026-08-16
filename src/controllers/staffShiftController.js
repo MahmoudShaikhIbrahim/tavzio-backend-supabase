@@ -69,4 +69,31 @@ const listShifts = asyncHandler(async (req, res) => {
   res.json(shifts);
 });
 
-module.exports = { getMyOpenShift, clockIn, clockOut, listShifts };
+// @route GET /api/businesses/:businessId/staff-shifts/my-schedule
+// The calling staff member's own upcoming scheduled shifts - deliberately
+// on this (staff-accessible) router rather than the owner-only /hr one,
+// since a staff member needs to see when they're expected to work even
+// though they can't touch the roster itself. Silently returns an empty
+// list if scheduling isn't enabled for this business, rather than a 403 -
+// a staff member has no "Features" screen to go fix that on, so an error
+// here would just be a dead end for them.
+const listMySchedule = asyncHandler(async (req, res) => {
+  const { data: business } = await req.supabase.from('businesses').select('features').eq('id', req.params.businessId).single();
+  if (!business?.features?.hr?.enabled || !business?.features?.hr?.scheduling) return res.json([]);
+
+  const from = req.query.from || new Date().toISOString();
+  const to = req.query.to || new Date(Date.now() + 14 * 86400000).toISOString();
+
+  const { data, error } = await req.supabase
+    .from('staff_schedules')
+    .select('id, scheduled_start, scheduled_end, role_label, notes')
+    .eq('business_id', req.params.businessId)
+    .eq('staff_id', req.user.id)
+    .gte('scheduled_start', from)
+    .lte('scheduled_start', to)
+    .order('scheduled_start');
+  if (error) return res.status(400).json({ message: error.message });
+  res.json(data || []);
+});
+
+module.exports = { getMyOpenShift, clockIn, clockOut, listShifts, listMySchedule };

@@ -3,6 +3,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const { notifyCardUsed, sendDeviceConfirmation } = require('../utils/notifications');
 const { resolveText } = require('../utils/translate');
 const { maybeAutoCloseTable } = require('../utils/tableAutoClose');
+const { sendPrintJob } = require('../utils/printNodeAdapter');
 
 function detectDevice(userAgent = '') {
   const ua = userAgent.toLowerCase();
@@ -2026,8 +2027,64 @@ async function finalizePaidBill({ business, payment, selectedItems, appliedClaim
     paymentId: payment.id,
   };
 
+  await printPaidBillReceipt(business, payment, receipt);
 
   return receipt;
+}
+
+// Fires a receipt to the business's connected printer the moment a bill
+// payment has genuinely gone through, via the NFC stand - covers every
+// provider (Tap in-page, Telr/N-Genius/Ziina redirect, and the background
+// reconciliation catch-up) since all three funnel through here. Silent
+// no-op if the business hasn't connected a printer - never blocks or
+// fails the payment itself over a print job.
+async function printPaidBillReceipt(business, payment, receipt) {
+  try {
+    const { data: printerIntegration } = await supabaseAdmin
+      .from('pos_integrations')
+      .select('config')
+      .eq('business_id', business.id)
+      .eq('purpose', 'printing')
+      .eq('enabled', true)
+      .maybeSingle();
+    if (!printerIntegration) return;
+
+    const { data: biz } = await supabaseAdmin.from('businesses').select('name').eq('id', business.id).single();
+    let tableLabel = '';
+    if (payment.card_id) {
+      const { data: card } = await supabaseAdmin.from('cards').select('label').eq('id', payment.card_id).maybeSingle();
+      tableLabel = card?.label || '';
+    }
+
+    const lines = [];
+    lines.push((biz?.name || 'Tavzio').toUpperCase());
+    if (tableLabel) lines.push(`Table: ${tableLabel}`);
+    lines.push(new Date(receipt.paidAt).toLocaleString('en-GB'));
+    lines.push('--------------------------------');
+    for (const item of receipt.items) {
+      lines.push(`${item.quantity}x ${item.name}`.padEnd(24) + item.lineTotal.toFixed(2).padStart(8));
+    }
+    lines.push('--------------------------------');
+    lines.push('Subtotal'.padEnd(24) + receipt.subtotalExVat.toFixed(2).padStart(8));
+    if (receipt.discountAmount > 0) {
+      lines.push(`Discount${receipt.rewardDescription ? ` (${receipt.rewardDescription})` : ''}`.padEnd(24) + `-${receipt.discountAmount.toFixed(2)}`.padStart(8));
+    }
+    lines.push(`VAT (${(receipt.vatRate * 100).toFixed(0)}%)`.padEnd(24) + receipt.vatAmount.toFixed(2).padStart(8));
+    if (receipt.tip > 0) {
+      lines.push('Tip'.padEnd(24) + receipt.tip.toFixed(2).padStart(8));
+    }
+    lines.push('--------------------------------');
+    lines.push('TOTAL PAID'.padEnd(24) + receipt.total.toFixed(2).padStart(8));
+    lines.push('--------------------------------');
+    lines.push('PAID - thank you!');
+
+    await sendPrintJob(decryptConfig(printerIntegration.config), lines.join('\n'));
+  } catch (err) {
+    // A print failure is never allowed to affect the payment that already
+    // succeeded - the customer paid; a jammed or offline printer is a
+    // staff-side problem to notice and fix, not something to surface here.
+    console.error(`Paid-bill print failed for business ${business.id}, payment ${payment.id}:`, err.message);
+  }
 }
 
 const payBill = asyncHandler(async (req, res) => {

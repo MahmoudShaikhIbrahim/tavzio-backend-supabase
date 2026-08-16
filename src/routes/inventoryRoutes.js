@@ -2,6 +2,8 @@ const express = require('express');
 const {
   listSuppliers, createSupplier,
   listIngredients, createIngredient, updateIngredient, deleteIngredient, adjustStock,
+  recordWaste, getWasteReport, getLowStock, getValuation,
+  getMenuItemFoodCost, getActualFoodCost,
   getRecipe, setRecipe,
   listPurchaseOrders, createPurchaseOrder, receivePurchaseOrder,
 } = require('../controllers/inventoryController');
@@ -19,6 +21,13 @@ router.post('/ingredients', createIngredient);
 router.patch('/ingredients/:ingredientId', updateIngredient);
 router.delete('/ingredients/:ingredientId', deleteIngredient);
 router.post('/ingredients/:ingredientId/adjust', adjustStock);
+router.post('/ingredients/:ingredientId/waste', recordWaste);
+
+router.get('/low-stock', getLowStock);
+router.get('/valuation', getValuation);
+router.get('/waste-report', getWasteReport);
+router.get('/food-cost', getMenuItemFoodCost);
+router.get('/food-cost/actual', getActualFoodCost);
 
 router.get('/menu-items/:menuItemId/recipe', getRecipe);
 router.put('/menu-items/:menuItemId/recipe', setRecipe);

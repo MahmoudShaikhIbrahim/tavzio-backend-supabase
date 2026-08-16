@@ -3,6 +3,8 @@ const {
   listStaffDocuments, uploadStaffDocument, deleteStaffDocument,
   setStaffCommission, getCommissionReport,
   listTipDistributions, createTipDistribution,
+  setStaffWage, listSchedules, createSchedule, updateSchedule, deleteSchedule,
+  getLaborCostReport,
 } = require('../controllers/hrController');
 const { protect, authorize, enforceTenant } = require('../middleware/auth');
 
@@ -23,5 +25,14 @@ router.get('/commission-report', getCommissionReport);
 
 router.get('/tip-distributions', listTipDistributions);
 router.post('/tip-distributions', createTipDistribution);
+
+router.patch('/wage/:staffId', setStaffWage);
+
+router.get('/schedules', listSchedules);
+router.post('/schedules', createSchedule);
+router.patch('/schedules/:scheduleId', updateSchedule);
+router.delete('/schedules/:scheduleId', deleteSchedule);
+
+router.get('/labor-cost', getLaborCostReport);
 
 module.exports = router;

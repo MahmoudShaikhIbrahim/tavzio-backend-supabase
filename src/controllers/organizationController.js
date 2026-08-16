@@ -281,9 +281,79 @@ const getConsolidatedReport = asyncHandler(async (req, res) => {
   res.json({ from, to, locations: results, grandTotal: Math.round(grandTotal * 100) / 100 });
 });
 
+// @route GET /api/organizations/report/hotel?from=&to=
+// The real gap in multi-property: getConsolidatedReport above only
+// rolls up order revenue - zero hotel metrics, so a hotel group had no
+// way to compare properties on the numbers that actually matter for a
+// hotel: occupancy, ADR (average daily rate - room revenue per room
+// actually sold), and RevPAR (revenue per available room - the
+// standard industry metric that accounts for rooms that sat empty, not
+// just the ones that sold). Scoped to hotel-category locations only -
+// a restaurant location in the same org has no room inventory to report on.
+const getHotelConsolidatedReport = asyncHandler(async (req, res) => {
+  const from = req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const to = req.query.to || new Date().toISOString().slice(0, 10);
+
+  const { data: locations } = await supabaseAdmin.from('businesses').select('id, name').eq('organization_id', req.orgId).eq('category', 'hotel');
+  if (!locations || locations.length === 0) return res.json({ from, to, locations: [], orgTotals: null });
+
+  const locationIds = locations.map((l) => l.id);
+  const days = Math.max(1, Math.round((new Date(to) - new Date(from)) / 86400000) + 1);
+
+  const { data: rooms } = await supabaseAdmin.from('hotel_rooms').select('id, business_id').in('business_id', locationIds).neq('status', 'out_of_order');
+  const { data: audits } = await supabaseAdmin
+    .from('hotel_night_audits')
+    .select('business_id, room_revenue_aed, rooms_sold, rooms_available')
+    .in('business_id', locationIds)
+    .gte('business_date', from)
+    .lte('business_date', to);
+
+  const roomsAvailableByLocation = {};
+  for (const r of rooms || []) roomsAvailableByLocation[r.business_id] = (roomsAvailableByLocation[r.business_id] || 0) + 1;
+
+  const results = locations.map((l) => {
+    const locationAudits = (audits || []).filter((a) => a.business_id === l.id);
+    const roomRevenueAed = locationAudits.reduce((sum, a) => sum + Number(a.room_revenue_aed), 0);
+    const roomNightsSold = locationAudits.reduce((sum, a) => sum + Number(a.rooms_sold), 0);
+    // Uses the room count as of now, times the number of audited days in
+    // range, as the available-room-nights denominator - the same
+    // approach a real RevPAR calculation uses when a property's room
+    // count hasn't changed mid-period, which is the normal case.
+    const roomsAvailable = roomsAvailableByLocation[l.id] || 0;
+    const availableRoomNights = roomsAvailable * locationAudits.length;
+    const occupancyPct = availableRoomNights > 0 ? Math.round((roomNightsSold / availableRoomNights) * 1000) / 10 : null;
+    const adrAed = roomNightsSold > 0 ? Math.round((roomRevenueAed / roomNightsSold) * 100) / 100 : null;
+    const revParAed = availableRoomNights > 0 ? Math.round((roomRevenueAed / availableRoomNights) * 100) / 100 : null;
+
+    return {
+      businessId: l.id,
+      name: l.name,
+      roomsAvailable,
+      auditedDays: locationAudits.length,
+      roomRevenueAed: Math.round(roomRevenueAed * 100) / 100,
+      occupancyPct,
+      adrAed,
+      revParAed,
+    };
+  }).sort((a, b) => (b.revParAed || 0) - (a.revParAed || 0));
+
+  const totalRoomRevenueAed = results.reduce((sum, r) => sum + r.roomRevenueAed, 0);
+  const totalRoomsAvailable = results.reduce((sum, r) => sum + r.roomsAvailable, 0);
+
+  res.json({
+    from, to, days,
+    locations: results,
+    orgTotals: {
+      totalRoomRevenueAed: Math.round(totalRoomRevenueAed * 100) / 100,
+      totalRoomsAvailable,
+      locationsWithNoAuditData: results.filter((r) => r.auditedDays === 0).length,
+    },
+  });
+});
+
 module.exports = {
   listOrganizations, createOrganization, setBusinessOrganization, inviteOrgOwner,
   requireOrgOwner, getMyOrganization,
   listOrgMenuCategories, createOrgMenuCategory, createOrgMenuItem, updateOrgMenuItem, deleteOrgMenuItem,
-  publishMenuToLocations, getConsolidatedReport,
+  publishMenuToLocations, getConsolidatedReport, getHotelConsolidatedReport,
 };

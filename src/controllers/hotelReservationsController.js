@@ -1,5 +1,7 @@
 const asyncHandler = require('../utils/asyncHandler');
 const { logAction } = require('../utils/auditLog');
+const { computeEffectiveRate } = require('./hotelRevenueController');
+const { ensureCleaningTask } = require('./housekeepingController');
 
 const listReservations = asyncHandler(async (req, res) => {
   let query = req.supabase
@@ -49,9 +51,14 @@ const createReservation = asyncHandler(async (req, res) => {
   }
 
   let resolvedRate = rateAed;
+  // A rate plan's price for THIS specific date - a date-specific override
+  // if one's set, then an occupancy-based surcharge on top if a pricing
+  // rule applies - rather than just the plan's flat base_rate_aed. Only
+  // engages when no explicit rateAed was given, same as the room-rate
+  // fallback below it - an explicit rate always wins, deliberately.
   if (resolvedRate == null && ratePlanId) {
-    const { data: plan } = await req.supabase.from('hotel_rate_plans').select('base_rate_aed').eq('id', ratePlanId).single();
-    resolvedRate = plan?.base_rate_aed;
+    const effective = await computeEffectiveRate(req.supabase, req.params.businessId, ratePlanId, checkInDate);
+    resolvedRate = effective?.finalRateAed;
   }
   if (resolvedRate == null && roomId) {
     const { data: room } = await req.supabase.from('hotel_rooms').select('base_rate_aed').eq('id', roomId).single();
@@ -90,7 +97,17 @@ const checkIn = asyncHandler(async (req, res) => {
 
   const { data: room } = await req.supabase.from('hotel_rooms').select('*').eq('id', finalRoomId).single();
   if (!room) return res.status(404).json({ message: 'Room not found' });
-  if (room.status === 'occupied') return res.status(400).json({ message: `Room ${room.room_number} is already occupied` });
+  // Real gap fixed here: this used to only block on 'occupied', which
+  // meant a room sitting in 'maintenance' or 'out_of_order' - actively
+  // broken, or physically unfit to sell - could still be checked a guest
+  // into. Every non-available status blocks check-in now.
+  if (room.status !== 'available') {
+    const reason = room.status === 'occupied' ? 'is already occupied'
+      : room.status === 'dirty' ? 'has not been cleaned yet'
+      : room.status === 'maintenance' ? 'is currently under maintenance'
+      : 'is out of order';
+    return res.status(400).json({ message: `Room ${room.room_number} ${reason}` });
+  }
 
   if (await hasOverlap(req.supabase, req.params.businessId, finalRoomId, reservation.check_in_date, reservation.check_out_date, reservation.id)) {
     return res.status(409).json({ message: 'This room now overlaps with another active reservation - assign a different room' });
@@ -157,16 +174,35 @@ const checkOut = asyncHandler(async (req, res) => {
   if (reservation.status !== 'checked_in') return res.status(400).json({ message: `Cannot check out a reservation with status "${reservation.status}"` });
 
   const { data: folios } = await req.supabase.from('hotel_folios').select('*').eq('reservation_id', reservation.id).eq('status', 'open');
-  let totalBalance = 0;
+
+  // Per-folio balance, not just one combined total - this is what makes
+  // direct billing actually work: a guest-payer folio with money still
+  // owed blocks checkout exactly as before (personal debt can't be
+  // deferred without an account), but a company-payer folio's remaining
+  // balance goes to the city ledger instead of blocking anything -
+  // that's the entire point of a corporate account existing.
+  const folioBalances = [];
   for (const folio of folios || []) {
     const { data: charges } = await req.supabase.from('hotel_folio_charges').select('amount_aed').eq('folio_id', folio.id);
-    totalBalance += (charges || []).reduce((sum, c) => sum + Number(c.amount_aed), 0);
+    const balance = (charges || []).reduce((sum, c) => sum + Number(c.amount_aed), 0);
+    folioBalances.push({ folio, balance });
   }
-  if (totalBalance > 0) {
-    return res.status(400).json({ message: `Cannot check out - outstanding balance of AED ${totalBalance.toFixed(2)} across ${(folios || []).length} folio(s). Record payment first.` });
+
+  const blockingFolio = folioBalances.find((f) => f.balance > 0 && f.folio.payer_type !== 'company');
+  if (blockingFolio) {
+    return res.status(400).json({ message: `Cannot check out - outstanding balance of AED ${blockingFolio.balance.toFixed(2)} on the guest folio. Record payment first.` });
   }
-  for (const folio of folios || []) {
-    await req.supabase.from('hotel_folios').update({ status: 'closed', closed_at: new Date().toISOString() }).eq('id', folio.id);
+
+  for (const { folio, balance } of folioBalances) {
+    if (folio.payer_type === 'company' && balance > 0) {
+      await req.supabase.from('hotel_folios').update({ status: 'billed_to_account', closed_at: new Date().toISOString() }).eq('id', folio.id);
+      await req.supabase.from('hotel_city_ledger_entries').insert({
+        business_id: req.params.businessId, folio_id: folio.id,
+        company_name: folio.company_name || 'Unnamed company', amount_aed: balance,
+      });
+    } else {
+      await req.supabase.from('hotel_folios').update({ status: 'closed', closed_at: new Date().toISOString() }).eq('id', folio.id);
+    }
   }
 
   const { data: updated, error } = await req.supabase
@@ -179,6 +215,7 @@ const checkOut = asyncHandler(async (req, res) => {
 
   if (reservation.room_id) {
     await req.supabase.from('hotel_rooms').update({ status: 'dirty' }).eq('id', reservation.room_id);
+    await ensureCleaningTask(req.supabase, req.params.businessId, reservation.room_id);
   }
 
   await logAction({ businessId: req.params.businessId, actor: req.user, action: 'reservation_checked_out', targetId: reservation.id, details: { foliosClosed: (folios || []).length } });
@@ -200,4 +237,170 @@ const cancelReservation = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
-module.exports = { listReservations, createReservation, checkIn, checkOut, cancelReservation };
+// @route POST /api/businesses/:businessId/hotel/reservations/:reservationId/no-show
+// The DB has always allowed a 'no_show' status - nothing ever set it.
+// Distinct from cancellation: a no-show is a guest who never arrived
+// for a confirmed booking, kept as its own fact for reporting (no-show
+// rate is a real metric hotels track, separate from cancellation rate).
+// No room to release - a confirmed (not yet checked-in) reservation
+// never occupied a room in the first place.
+const markNoShow = asyncHandler(async (req, res) => {
+  const { data, error } = await req.supabase
+    .from('hotel_reservations')
+    .update({ status: 'no_show' })
+    .eq('id', req.params.reservationId)
+    .eq('business_id', req.params.businessId)
+    .eq('status', 'confirmed')
+    .select()
+    .single();
+  if (error || !data) return res.status(400).json({ message: 'Could not mark no-show - only a confirmed (not yet checked-in) reservation can be' });
+
+  await logAction({ businessId: req.params.businessId, actor: req.user, action: 'reservation_no_show', targetId: data.id, details: {} });
+  res.json(data);
+});
+
+// @route PATCH /api/businesses/:businessId/hotel/reservations/:reservationId
+// Body: { checkInDate?, checkOutDate?, roomId?, rateAed? }
+// Two very different cases depending on status, both real gaps that
+// only "cancel and rebook" used to cover:
+//
+// - 'confirmed' (pre-arrival): everything is editable - dates, room,
+//   rate - re-validated against the same overlap check createReservation
+//   uses. No folio exists yet, so nothing else to touch.
+// - 'checked_in': only checkOutDate can change here (extending or
+//   shortening an in-progress stay). Room changes go through the
+//   separate room-transfer endpoint below, since that also has to move
+//   physical room status, not just a date. Extending automatically adds
+//   the new nights' room charges to the folio, at the reservation's
+//   existing rate - the same math checkIn already used to create the
+//   original charges. Shortening does NOT auto-remove already-created
+//   charges (deleting billing lines automatically is a real money
+//   operation this endpoint has no business doing silently) - staff
+//   remove the extra night(s) from the folio directly if needed, same
+//   as removing any other mistaken charge.
+const modifyReservation = asyncHandler(async (req, res) => {
+  const { checkInDate, checkOutDate, roomId, rateAed } = req.body;
+
+  const { data: reservation } = await req.supabase
+    .from('hotel_reservations')
+    .select('*')
+    .eq('id', req.params.reservationId)
+    .eq('business_id', req.params.businessId)
+    .single();
+  if (!reservation) return res.status(404).json({ message: 'Reservation not found' });
+
+  if (reservation.status === 'confirmed') {
+    const newCheckIn = checkInDate || reservation.check_in_date;
+    const newCheckOut = checkOutDate || reservation.check_out_date;
+    const newRoomId = roomId !== undefined ? roomId : reservation.room_id;
+    if (new Date(newCheckOut) <= new Date(newCheckIn)) {
+      return res.status(400).json({ message: 'checkOutDate must be after checkInDate' });
+    }
+    if (newRoomId && await hasOverlap(req.supabase, req.params.businessId, newRoomId, newCheckIn, newCheckOut, reservation.id)) {
+      return res.status(409).json({ message: 'This room is already booked for an overlapping date range' });
+    }
+    const update = { check_in_date: newCheckIn, check_out_date: newCheckOut, room_id: newRoomId };
+    if (rateAed != null) update.rate_aed = rateAed;
+
+    const { data, error } = await req.supabase.from('hotel_reservations').update(update).eq('id', reservation.id).select().single();
+    if (error) return res.status(400).json({ message: error.message });
+    await logAction({ businessId: req.params.businessId, actor: req.user, action: 'reservation_modified', targetId: data.id, details: { checkInDate: newCheckIn, checkOutDate: newCheckOut, roomId: newRoomId } });
+    return res.json(data);
+  }
+
+  if (reservation.status === 'checked_in') {
+    if (!checkOutDate) return res.status(400).json({ message: 'Only checkOutDate can be changed on a checked-in stay - use the room-transfer endpoint to change rooms' });
+    if (new Date(checkOutDate) <= new Date(reservation.check_in_date)) {
+      return res.status(400).json({ message: 'checkOutDate must be after the original check-in date' });
+    }
+    if (reservation.room_id && await hasOverlap(req.supabase, req.params.businessId, reservation.room_id, reservation.check_in_date, checkOutDate, reservation.id)) {
+      return res.status(409).json({ message: 'Extending into this date range conflicts with another reservation for this room' });
+    }
+
+    const oldNights = Math.max(1, Math.round((new Date(reservation.check_out_date) - new Date(reservation.check_in_date)) / 86400000));
+    const newNights = Math.max(1, Math.round((new Date(checkOutDate) - new Date(reservation.check_in_date)) / 86400000));
+
+    const { data: updated, error } = await req.supabase.from('hotel_reservations').update({ check_out_date: checkOutDate }).eq('id', reservation.id).select().single();
+    if (error) return res.status(400).json({ message: error.message });
+
+    if (newNights > oldNights) {
+      const { data: folio } = await req.supabase.from('hotel_folios').select('id').eq('reservation_id', reservation.id).eq('is_primary', true).maybeSingle();
+      const { data: room } = await req.supabase.from('hotel_rooms').select('room_number').eq('id', reservation.room_id).maybeSingle();
+      if (folio) {
+        const addedNights = newNights - oldNights;
+        const extraCharges = Array.from({ length: addedNights }, (_, i) => ({
+          folio_id: folio.id,
+          description: `Room ${room?.room_number || ''} - night ${oldNights + i + 1} (stay extended)`,
+          amount_aed: reservation.rate_aed,
+          charge_type: 'room',
+        }));
+        await req.supabase.from('hotel_folio_charges').insert(extraCharges);
+      }
+    }
+
+    await logAction({ businessId: req.params.businessId, actor: req.user, action: 'reservation_modified', targetId: updated.id, details: { newCheckOutDate: checkOutDate, oldNights, newNights } });
+    return res.json(updated);
+  }
+
+  return res.status(400).json({ message: `Cannot modify a reservation with status "${reservation.status}"` });
+});
+
+// @route POST /api/businesses/:businessId/hotel/reservations/:reservationId/transfer-room
+// Body: { newRoomId }
+// Moves a checked-in guest to a different room - operational move only
+// (physical room status + the reservation's room_id), deliberately does
+// NOT touch the folio. Already-billed nights stay billed as they were;
+// a rate change from the move is a deliberate manual adjustment staff
+// make on the folio if the new room's rate genuinely differs, not
+// something this endpoint should silently decide on its own.
+const transferRoom = asyncHandler(async (req, res) => {
+  const { newRoomId } = req.body;
+  if (!newRoomId) return res.status(400).json({ message: 'newRoomId is required' });
+
+  const { data: reservation } = await req.supabase
+    .from('hotel_reservations')
+    .select('*')
+    .eq('id', req.params.reservationId)
+    .eq('business_id', req.params.businessId)
+    .single();
+  if (!reservation) return res.status(404).json({ message: 'Reservation not found' });
+  if (reservation.status !== 'checked_in') return res.status(400).json({ message: 'Only a checked-in reservation can be transferred to a new room' });
+  if (newRoomId === reservation.room_id) return res.status(400).json({ message: 'Guest is already in this room' });
+
+  const { data: newRoom } = await req.supabase.from('hotel_rooms').select('*').eq('id', newRoomId).eq('business_id', req.params.businessId).single();
+  if (!newRoom) return res.status(404).json({ message: 'Room not found' });
+  if (newRoom.status !== 'available') {
+    const reason = newRoom.status === 'occupied' ? 'is already occupied'
+      : newRoom.status === 'dirty' ? 'has not been cleaned yet'
+      : newRoom.status === 'maintenance' ? 'is currently under maintenance'
+      : 'is out of order';
+    return res.status(400).json({ message: `Room ${newRoom.room_number} ${reason}` });
+  }
+
+  if (await hasOverlap(req.supabase, req.params.businessId, newRoomId, reservation.check_in_date, reservation.check_out_date, reservation.id)) {
+    return res.status(409).json({ message: 'The new room has a conflicting reservation for these dates' });
+  }
+
+  const oldRoomId = reservation.room_id;
+  const { data: updated, error } = await req.supabase
+    .from('hotel_reservations')
+    .update({ room_id: newRoomId })
+    .eq('id', reservation.id)
+    .select()
+    .single();
+  if (error) return res.status(400).json({ message: error.message });
+
+  await req.supabase.from('hotel_rooms').update({ status: 'occupied' }).eq('id', newRoomId);
+  // Old room needs housekeeping's attention before anyone else moves in,
+  // exactly like a real checkout - same status a guest departing entirely
+  // leaves the room in.
+  if (oldRoomId) {
+    await req.supabase.from('hotel_rooms').update({ status: 'dirty' }).eq('id', oldRoomId);
+    await ensureCleaningTask(req.supabase, req.params.businessId, oldRoomId);
+  }
+
+  await logAction({ businessId: req.params.businessId, actor: req.user, action: 'reservation_room_transferred', targetId: reservation.id, details: { oldRoomId, newRoomId } });
+  res.json(updated);
+});
+
+module.exports = { listReservations, createReservation, checkIn, checkOut, cancelReservation, markNoShow, modifyReservation, transferRoom };

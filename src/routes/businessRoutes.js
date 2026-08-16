@@ -87,6 +87,7 @@ router.use('/:businessId/till', tillRoutes);
 router.use('/:businessId/tables-floor', tableManagementRoutes);
 router.use('/:businessId/waitlist', waitlistRoutes);
 router.use('/:businessId/hotel', hotelRoutes);
+router.use('/:businessId/forecasting', require('./forecastingRoutes'));
 router.post('/:businessId/payment-transactions/:txnId/refund', protect, enforceTenant, require('../controllers/hotelPaymentController').refundTransaction);
 router.get('/:businessId/payment-reconciliation', protect, enforceTenant, require('../controllers/hotelPaymentController').getReconciliation);
 router.get('/:businessId/external-hotel-systems', protect, enforceTenant, require('../controllers/externalHotelSystemsController').listExternalIntegrations);

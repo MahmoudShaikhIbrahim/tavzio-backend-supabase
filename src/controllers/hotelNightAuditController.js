@@ -14,6 +14,42 @@ const getCurrentBusinessDate = asyncHandler(async (req, res) => {
   res.json({ businessDate: date });
 });
 
+// @route GET /api/businesses/:businessId/hotel/night-audit/preview
+// What running the audit right now WOULD do - shown before committing,
+// since this run auto-processes no-shows rather than just reporting
+// numbers. Staff should never be surprised by that.
+const getNightAuditPreview = asyncHandler(async (req, res) => {
+  const businessDate = await getBusinessDate(req.supabase, req.params.businessId);
+
+  const { count: noShowCandidateCount } = await req.supabase
+    .from('hotel_reservations')
+    .select('id', { count: 'exact', head: true })
+    .eq('business_id', req.params.businessId)
+    .eq('status', 'confirmed')
+    .lte('check_in_date', businessDate);
+
+  const { count: unresolvedDeparturesCount } = await req.supabase
+    .from('hotel_reservations')
+    .select('id', { count: 'exact', head: true })
+    .eq('business_id', req.params.businessId)
+    .eq('status', 'checked_in')
+    .lte('check_out_date', businessDate);
+
+  const { data: existingAudit } = await req.supabase
+    .from('hotel_night_audits')
+    .select('id')
+    .eq('business_id', req.params.businessId)
+    .eq('business_date', businessDate)
+    .maybeSingle();
+
+  res.json({
+    businessDate,
+    alreadyRun: !!existingAudit,
+    noShowCandidateCount: noShowCandidateCount || 0,
+    unresolvedDeparturesCount: unresolvedDeparturesCount || 0,
+  });
+});
+
 const runNightAudit = asyncHandler(async (req, res) => {
   const businessDate = await getBusinessDate(req.supabase, req.params.businessId);
 
@@ -27,6 +63,42 @@ const runNightAudit = asyncHandler(async (req, res) => {
 
   const dayStart = `${businessDate}T00:00:00.000Z`;
   const dayEnd = `${businessDate}T23:59:59.999Z`;
+
+  // The actual operational fix, not just a report: any reservation still
+  // 'confirmed' with a check-in date on or before tonight's business date
+  // never arrived - a real front desk would have caught this hours ago,
+  // but night audit is the backstop that guarantees it never just sits
+  // there indefinitely. Auto-processed as part of the audit itself,
+  // exactly what night audit is FOR in a real hotel.
+  const { data: noShowCandidates } = await req.supabase
+    .from('hotel_reservations')
+    .select('id')
+    .eq('business_id', req.params.businessId)
+    .eq('status', 'confirmed')
+    .lte('check_in_date', businessDate);
+  let noShowsProcessed = 0;
+  if (noShowCandidates?.length) {
+    const { count } = await req.supabase
+      .from('hotel_reservations')
+      .update({ status: 'no_show' }, { count: 'exact' })
+      .in('id', noShowCandidates.map((r) => r.id));
+    noShowsProcessed = count || 0;
+    for (const r of noShowCandidates) {
+      await logAction({ businessId: req.params.businessId, actor: req.user, action: 'reservation_no_show', targetId: r.id, details: { autoProcessedByNightAudit: true, businessDate } });
+    }
+  }
+
+  // Flagged, not touched - a guest still checked in past their own
+  // checkout date is a real exception someone needs eyes on (extend the
+  // stay? walk them out tomorrow? billing dispute?), but automatically
+  // checking them out would mean automatically deciding how their folio
+  // gets settled, which this has no business doing on its own.
+  const { count: unresolvedDeparturesCount } = await req.supabase
+    .from('hotel_reservations')
+    .select('id', { count: 'exact', head: true })
+    .eq('business_id', req.params.businessId)
+    .eq('status', 'checked_in')
+    .lte('check_out_date', businessDate);
 
   const { data: charges } = await req.supabase
     .from('hotel_folio_charges')
@@ -87,6 +159,8 @@ const runNightAudit = asyncHandler(async (req, res) => {
       occupancy_rate: occupancyRate,
       arrivals_count: arrivals || 0,
       departures_count: departures || 0,
+      no_shows_processed: noShowsProcessed,
+      unresolved_departures_count: unresolvedDeparturesCount || 0,
     })
     .select()
     .single();
@@ -96,7 +170,7 @@ const runNightAudit = asyncHandler(async (req, res) => {
   nextDate.setDate(nextDate.getDate() + 1);
   await req.supabase.from('hotel_business_date').upsert({ business_id: req.params.businessId, current_date_value: nextDate.toISOString().slice(0, 10) });
 
-  await logAction({ businessId: req.params.businessId, actor: req.user, action: 'night_audit_run', targetId: audit.id, details: { businessDate, roomRevenue, fnbRevenue, occupancyRate } });
+  await logAction({ businessId: req.params.businessId, actor: req.user, action: 'night_audit_run', targetId: audit.id, details: { businessDate, roomRevenue, fnbRevenue, occupancyRate, noShowsProcessed } });
   res.status(201).json(audit);
 });
 
@@ -110,4 +184,4 @@ const listNightAudits = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
-module.exports = { getCurrentBusinessDate, runNightAudit, listNightAudits };
+module.exports = { getCurrentBusinessDate, getNightAuditPreview, runNightAudit, listNightAudits };
