@@ -16,6 +16,7 @@ const publicContractRoutes = require('./routes/publicContractRoutes');
 const stripeRoutes = require('./routes/stripeRoutes');
 const leadRoutes = require('./routes/leadRoutes');
 const deliverectRoutes = require('./routes/deliverectRoutes');
+const contractsAdminRoutes = require('./routes/contractsAdminRoutes');
 
 const app = express();
 
@@ -66,6 +67,7 @@ app.use('/api/stripe', stripeRoutes);
 app.use('/api/leads', apiLimiter, leadRoutes);
 app.use('/api/deliverect', deliverectRoutes);
 app.use('/api/organizations', apiLimiter, require('./routes/organizationRoutes'));
+app.use('/api/contracts', apiLimiter, contractsAdminRoutes);
 app.get('/api/zoho-books/callback', require('./controllers/zohoBooksController').oauthCallback);
 
 app.use(notFound);

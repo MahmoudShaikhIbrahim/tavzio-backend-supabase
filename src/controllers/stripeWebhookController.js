@@ -40,10 +40,15 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
       const session = event.data.object;
       const contractId = session.metadata?.contractId;
       if (contractId) {
+        const { data: existing } = await supabaseAdmin.from('contracts').select('business_id').eq('id', contractId).maybeSingle();
+        // A contract already linked to a business (the old/renewal path)
+        // can go straight to 'active' - the business already exists. A
+        // standalone contract stops at 'paid': onboarding is the only
+        // thing allowed to promote it to 'active'.
         await supabaseAdmin
           .from('contracts')
           .update({
-            status: 'active',
+            status: existing?.business_id ? 'active' : 'paid',
             stripe_customer_id: session.customer,
             stripe_subscription_id: session.subscription,
           })
@@ -60,6 +65,11 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
       const subscriptionId = invoice.subscription;
       const { data: contract } = await supabaseAdmin.from('contracts').select('*').eq('stripe_subscription_id', subscriptionId).maybeSingle();
       if (!contract) break;
+      // Not onboarded yet - there's no business to issue a receipt
+      // against or an owner to email. This installment's receipt gets
+      // caught up once onboardContract links the business; every
+      // subsequent one bills and receipts normally.
+      if (!contract.business_id) break;
 
       const { data: business } = await supabaseAdmin.from('businesses').select('name, owner, status').eq('id', contract.business_id).single();
       if (!business) break;

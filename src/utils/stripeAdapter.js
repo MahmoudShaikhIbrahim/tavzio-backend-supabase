@@ -58,8 +58,8 @@ async function createSubscriptionCheckoutSession({ contract, business, successUr
           quantity: 1,
         },
       ],
-      metadata: { contractId: contract.id, businessId: business.id },
-      subscription_data: { metadata: { contractId: contract.id, businessId: business.id } },
+      metadata: { contractId: contract.id, businessId: business.id || '' },
+      subscription_data: { metadata: { contractId: contract.id, businessId: business.id || '' } },
       success_url: successUrl,
       cancel_url: cancelUrl,
     });

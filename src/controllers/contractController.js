@@ -28,6 +28,19 @@ function periodsPerYear(frequency) {
   return frequency === 'monthly' ? 12 : frequency === 'quarterly' ? 4 : 1;
 }
 
+// A contract's "party" - the business it's with - either already exists
+// (business_id set, the old/renewal path) or hasn't been onboarded yet,
+// in which case the client's own details typed in at contract-creation
+// time stand in for it. Every no-login / admin-write code path below
+// goes through this instead of assuming a businesses row exists.
+async function resolveContractParty(contract) {
+  if (contract.business_id) {
+    const { data: business } = await supabaseAdmin.from('businesses').select('name, trn').eq('id', contract.business_id).single();
+    return business || { name: contract.client_business_name || 'Client', trn: null };
+  }
+  return { name: contract.client_business_name || 'Client', trn: null };
+}
+
 // @route POST /api/businesses/:businessId/contracts  (super_admin only)
 // Body: { startDate, years, paymentFrequency, standsCount, systemFeeOverride, cardPriceOverride }
 const createContract = asyncHandler(async (req, res) => {
@@ -85,22 +98,213 @@ const createContract = asyncHandler(async (req, res) => {
   res.status(201).json(contract);
 });
 
+// @route POST /api/contracts  (super_admin only)
+// Body: { clientName, clientEmail, clientBusinessName, clientCategory, startDate, paymentFrequency, standsCount, systemFeeOverride, cardPriceOverride, planType }
+// The new front door for onboarding: no business account exists yet.
+// Everything the client will eventually become is captured right here on
+// the contract row (client_* columns) and only turns into a real
+// businesses row + login when onboardContract fires, after the client
+// has actually signed and paid.
+const createStandaloneContract = asyncHandler(async (req, res) => {
+  const {
+    clientName, clientEmail, clientBusinessName, clientCategory = 'other',
+    startDate, paymentFrequency, standsCount = 0, systemFeeOverride, cardPriceOverride, planType = 'connect',
+  } = req.body;
+
+  if (!clientName || !clientEmail || !clientBusinessName) {
+    return res.status(400).json({ message: 'clientName, clientEmail, and clientBusinessName are required' });
+  }
+  if (!startDate || !paymentFrequency) {
+    return res.status(400).json({ message: 'startDate and paymentFrequency are required' });
+  }
+  if (!['connect', 'full'].includes(planType)) {
+    return res.status(400).json({ message: 'planType must be connect or full' });
+  }
+
+  const normalizedEmail = clientEmail.trim().toLowerCase();
+
+  // The actual fix for "why is an already-onboarded business getting a
+  // second contract" - a contract is now tied to a client by email
+  // rather than by clicking into a specific business, so this is the one
+  // place that can actually catch it: block a new contract for anyone
+  // whose most recent contract with this email is already active.
+  const { data: existingActive } = await supabaseAdmin
+    .from('contracts')
+    .select('id, contract_number')
+    .eq('client_email', normalizedEmail)
+    .eq('status', 'active')
+    .maybeSingle();
+  if (existingActive) {
+    return res.status(409).json({
+      message: `${clientEmail} already has an active contract (${existingActive.contract_number}). This flow is for new clients only.`,
+    });
+  }
+
+  const start = new Date(startDate);
+  const end = new Date(start);
+  end.setFullYear(end.getFullYear() + 1);
+
+  const category = clientCategory === 'hotel' ? 'hotel' : 'restaurant';
+  const planRates = PLAN_RATES[planType][category];
+  const systemFee = systemFeeOverride != null ? Number(systemFeeOverride) : planRates.base;
+  const cardPrice = cardPriceOverride != null ? Number(cardPriceOverride) : planRates.perUnit;
+  const annualTotal = (systemFee + standsCount * cardPrice) * 12;
+
+  const { count } = await supabaseAdmin.from('contracts').select('id', { count: 'exact', head: true });
+  const contractNumber = `TVZ-C-${start.getFullYear()}-${String((count || 0) + 1).padStart(4, '0')}`;
+  const signToken = crypto.randomBytes(24).toString('hex');
+
+  const { data: contract, error } = await supabaseAdmin
+    .from('contracts')
+    .insert({
+      business_id: null,
+      client_name: clientName.trim(),
+      client_email: normalizedEmail,
+      client_business_name: clientBusinessName.trim(),
+      client_category: clientCategory,
+      contract_number: contractNumber,
+      start_date: start.toISOString().slice(0, 10),
+      end_date: end.toISOString().slice(0, 10),
+      payment_frequency: paymentFrequency,
+      stands_count: standsCount,
+      system_fee_aed: systemFee,
+      card_price_aed: cardPrice,
+      annual_total_aed: annualTotal,
+      plan_type: planType,
+      status: 'draft',
+      sign_token: signToken,
+      sign_token_expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      created_by: req.user.id,
+    })
+    .select()
+    .single();
+  if (error) return res.status(400).json({ message: error.message });
+
+  res.status(201).json(contract);
+});
+
+// @route GET /api/contracts  (super_admin only)
+// Every contract regardless of onboarding state - the list this new
+// flow's admin page reads from, since a pre-onboarding contract has no
+// business to be listed under.
+const listAllContracts = asyncHandler(async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from('contracts')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (error) return res.status(400).json({ message: error.message });
+  res.json(data);
+});
+
+// @route POST /api/contracts/:contractId/onboard  (super_admin only)
+// The one deliberate moment a real Tavzio account gets created for this
+// client - never earlier. By the time this fires, the contract is
+// already signed and (normally) paid; this provisions the login (the
+// owner sets their own password via Supabase's invite email, same
+// mechanism as staff/org invites elsewhere in this codebase), creates
+// the business from the details captured back when the contract was
+// created, and links the two together.
+const onboardContract = asyncHandler(async (req, res) => {
+  const { data: contract } = await supabaseAdmin.from('contracts').select('*').eq('id', req.params.contractId).single();
+  if (!contract) return res.status(404).json({ message: 'Contract not found' });
+  if (contract.business_id) return res.status(400).json({ message: 'This contract is already linked to a business' });
+  if (!['signed', 'paid'].includes(contract.status)) {
+    return res.status(400).json({ message: 'This contract must be signed before it can be onboarded' });
+  }
+  if (!contract.client_email || !contract.client_business_name) {
+    return res.status(400).json({ message: 'This contract has no client details on file' });
+  }
+
+  // Slug derived from the business name, made unique with a numeric
+  // suffix on collision - same convention as the Create Business form's
+  // own slugify(), just resolved here since nobody types one in by hand
+  // for a standalone contract.
+  const baseSlug = contract.client_business_name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'business';
+  let slug = baseSlug;
+  let suffix = 1;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { data: existingSlug } = await supabaseAdmin.from('businesses').select('id').eq('slug', slug).maybeSingle();
+    if (!existingSlug) break;
+    suffix += 1;
+    slug = `${baseSlug}-${suffix}`;
+  }
+
+  const { data: created, error: createError } = await supabaseAdmin.auth.admin.inviteUserByEmail(contract.client_email, {
+    data: { name: contract.client_name, role: 'business_owner' },
+  });
+  if (createError) return res.status(400).json({ message: createError.message });
+
+  const { data: business, error: businessError } = await supabaseAdmin
+    .from('businesses')
+    .insert({
+      name: contract.client_business_name,
+      slug,
+      category: contract.client_category || 'other',
+      owner: created.user.id,
+      status: 'active',
+    })
+    .select()
+    .single();
+  if (businessError) return res.status(400).json({ message: businessError.message });
+
+  await supabaseAdmin.from('profiles').update({ business_id: business.id, must_change_password: true }).eq('id', created.user.id);
+
+  const { data: updatedContract, error: contractError } = await supabaseAdmin
+    .from('contracts')
+    .update({ business_id: business.id, status: 'active' })
+    .eq('id', contract.id)
+    .select()
+    .single();
+  if (contractError) return res.status(400).json({ message: contractError.message });
+
+  await logAction({
+    businessId: business.id,
+    actor: req.user,
+    action: 'contract_onboarded',
+    targetId: contract.id,
+    details: { contractNumber: contract.contract_number, clientEmail: contract.client_email },
+  });
+
+  res.status(201).json({ business, contract: updatedContract });
+});
+
+// @route GET /api/contracts/:contractId/preview  (super_admin only)
+// Business-agnostic counterpart to previewContract below, for a
+// standalone contract that has no businessId in the URL to hang off of.
+const previewStandaloneContract = asyncHandler(async (req, res) => {
+  const { data: contract } = await supabaseAdmin.from('contracts').select('*').eq('id', req.params.contractId).single();
+  if (!contract) return res.status(404).json({ message: 'Contract not found' });
+  const business = await resolveContractParty(contract);
+  res.json({ text: buildContractText(contract, business) });
+});
+
 // @route POST /api/businesses/:businessId/contracts/:contractId/send  (super_admin only)
-// The "send in a minute" step - emails the owner a no-login link to
-// review and sign. Requires the business to already have an owner
-// account with an email on file (super_admin creates the business
-// account first via the normal Create Business flow, same as today).
+// @route POST /api/contracts/:contractId/send  (super_admin only, standalone)
+// The "send in a minute" step - emails a no-login sign link. For a
+// standalone contract (no business yet) this goes straight to the
+// client_email captured at contract-creation time - no owner account is
+// needed, or created, just to send this email.
 const sendContract = asyncHandler(async (req, res) => {
   const { data: contract } = await supabaseAdmin.from('contracts').select('*').eq('id', req.params.contractId).single();
-  const { data: business } = await supabaseAdmin.from('businesses').select('name, owner').eq('id', req.params.businessId).single();
-  if (!contract || !business) return res.status(404).json({ message: 'Not found' });
+  if (!contract) return res.status(404).json({ message: 'Contract not found' });
 
-  const { data: ownerUser } = await supabaseAdmin.auth.admin.getUserById(business.owner);
-  const email = ownerUser?.user?.email;
-  if (!email) return res.status(400).json({ message: 'This business has no owner account with an email yet - create the account first' });
+  let email;
+  let businessName;
+  if (contract.business_id) {
+    const { data: business } = await supabaseAdmin.from('businesses').select('name, owner').eq('id', contract.business_id).single();
+    if (!business) return res.status(404).json({ message: 'Business not found' });
+    const { data: ownerUser } = await supabaseAdmin.auth.admin.getUserById(business.owner);
+    email = ownerUser?.user?.email;
+    businessName = business.name;
+  } else {
+    email = contract.client_email;
+    businessName = contract.client_business_name;
+  }
+  if (!email) return res.status(400).json({ message: 'No email on file for this contract' });
 
   const signUrl = `${process.env.CLIENT_URL}/sign/${contract.sign_token}`;
-  await sendContractSignLink({ email, businessName: business.name, signUrl });
+  await sendContractSignLink({ email, businessName, signUrl });
 
   await supabaseAdmin.from('contracts').update({ status: 'sent', sent_at: new Date().toISOString() }).eq('id', contract.id);
   res.json({ message: `Sent to ${email}` });
@@ -205,8 +409,8 @@ const getPublicContractByToken = asyncHandler(async (req, res) => {
     return res.status(410).json({ message: 'This signing link has expired - ask Tavzio to resend it' });
   }
 
-  const { data: business } = await supabaseAdmin.from('businesses').select('name').eq('id', contract.business_id).single();
-  const isSigned = contract.status === 'signed' || contract.status === 'active';
+  const business = await resolveContractParty(contract);
+  const isSigned = ['signed', 'paid', 'active'].includes(contract.status);
 
   res.json({
     contractNumber: contract.contract_number,
@@ -234,12 +438,11 @@ const signPublicContract = asyncHandler(async (req, res) => {
   if (contract.sign_token_expires_at && new Date(contract.sign_token_expires_at) < new Date()) {
     return res.status(410).json({ message: 'This signing link has expired - ask Tavzio to resend it' });
   }
-  if (contract.status === 'signed' || contract.status === 'active') {
+  if (['signed', 'paid', 'active'].includes(contract.status)) {
     return res.status(400).json({ message: 'This contract has already been signed' });
   }
 
-  const { data: business } = await supabaseAdmin.from('businesses').select('name').eq('id', contract.business_id).single();
-  if (!business) return res.status(404).json({ message: 'Business not found' });
+  const business = await resolveContractParty(contract);
 
   const snapshotText = buildContractText(contract, business);
   const signerIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '';
@@ -336,13 +539,21 @@ const signContract = asyncHandler(async (req, res) => {
 // signing renders as the e-signature block - the DocuSign-style proof
 // of consent, permanently part of this specific document.
 const downloadContractPdf = asyncHandler(async (req, res) => {
-  const { data: contract } = await req.supabase.from('contracts').select('*').eq('id', req.params.contractId).eq('business_id', req.params.businessId).single();
+  const { data: contract } = await req.supabase.from('contracts').select('*').eq('id', req.params.contractId).single();
   if (!contract) return res.status(404).json({ message: 'Contract not found' });
+  // Authenticated dashboard route passes a real businessId in the URL
+  // and expects it to match; the public/no-login route (which may be a
+  // not-yet-onboarded standalone contract) skips this check entirely.
+  if (req.params.businessId && contract.business_id && String(contract.business_id) !== String(req.params.businessId)) {
+    return res.status(404).json({ message: 'Contract not found' });
+  }
 
-  const { data: business } = await req.supabase.from('businesses').select('name, trn').eq('id', req.params.businessId).single();
+  const business = contract.business_id
+    ? (await req.supabase.from('businesses').select('name, trn').eq('id', contract.business_id).single()).data
+    : { name: contract.client_business_name || 'Client', trn: null };
   const { data: branding } = await req.supabase.from('receipt_branding').select('*').limit(1).maybeSingle();
 
-  const isSigned = contract.status === 'signed' || contract.status === 'active';
+  const isSigned = ['signed', 'paid', 'active'].includes(contract.status);
   const text = isSigned && contract.signed_snapshot_text ? contract.signed_snapshot_text : buildContractText(contract, business);
   const legalName = branding?.legal_name || 'Tavzio';
   const brass = '#b8925a';
@@ -424,7 +635,7 @@ const downloadPublicContractPdf = asyncHandler(async (req, res) => {
   const { data: contract } = await supabaseAdmin.from('contracts').select('*').eq('sign_token', req.params.token).maybeSingle();
   if (!contract) return res.status(404).json({ message: 'This link is invalid or has expired' });
   req.params.contractId = contract.id;
-  req.params.businessId = contract.business_id;
+  req.params.businessId = contract.business_id || undefined;
   req.supabase = supabaseAdmin; // no authenticated RLS session on the public route - service role, scoped manually above
   return downloadContractPdf(req, res);
 });
@@ -432,5 +643,6 @@ const downloadPublicContractPdf = asyncHandler(async (req, res) => {
 module.exports = {
   createContract, sendContract, listContracts, previewContract, signContract, downloadContractPdf, downloadPublicContractPdf,
   getPublicContractByToken, signPublicContract,
+  createStandaloneContract, listAllContracts, onboardContract, previewStandaloneContract,
   buildContractText, periodsPerYear,
 };
