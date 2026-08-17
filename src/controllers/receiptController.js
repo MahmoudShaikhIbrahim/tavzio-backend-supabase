@@ -180,7 +180,7 @@ const getReceiptPdf = asyncHandler(async (req, res) => {
   }
   doc.moveDown(1.5);
 
-  doc.fontSize(18).fillColor(ink).font('Helvetica-Bold').text('RECEIPT', { align: 'right' });
+  doc.fontSize(18).fillColor(ink).font('Helvetica-Bold').text('TAX INVOICE', { align: 'right' });
   doc.fontSize(10).fillColor('#666').font('Helvetica')
     .text(`No. ${receipt.receipt_number}`, { align: 'right' })
     .text(`Date: ${new Date(receipt.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })}`, { align: 'right' });

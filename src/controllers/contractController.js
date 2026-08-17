@@ -10,6 +10,20 @@ const { calculateVatExclusive } = require('../utils/vat');
 const DEFAULT_SYSTEM_FEE = 200;
 const DEFAULT_CARD_PRICE = 20;
 
+// Kept in sync by hand with frontend/src/pages/Home.tsx's own PLANS
+// constant - the two live independently (backend and marketing page
+// don't share a JS module), so this comment is the only thing enforcing
+// that a contract's numbers and the public pricing page never drift
+// apart again the way DEFAULT_SYSTEM_FEE above already had.
+const PLAN_RATES = {
+  connect: { restaurant: { base: 300, perUnit: 20 }, hotel: { base: 1500, perUnit: 20 } },
+  full: { restaurant: { base: 800, perUnit: 20 }, hotel: { base: 2500, perUnit: 20 } },
+};
+const PLAN_DESCRIPTIONS = {
+  connect: 'Tavzio Connect: the core platform - ordering, payments, and guest engagement.',
+  full: 'Tavzio Full: everything in Connect, plus the full operational suite - inventory, staff, forecasting, and advanced analytics.',
+};
+
 function periodsPerYear(frequency) {
   return frequency === 'monthly' ? 12 : frequency === 'quarterly' ? 4 : 1;
 }
@@ -17,21 +31,30 @@ function periodsPerYear(frequency) {
 // @route POST /api/businesses/:businessId/contracts  (super_admin only)
 // Body: { startDate, years, paymentFrequency, standsCount, systemFeeOverride, cardPriceOverride }
 const createContract = asyncHandler(async (req, res) => {
-  const { startDate, paymentFrequency, standsCount = 0, systemFeeOverride, cardPriceOverride } = req.body;
+  const { startDate, paymentFrequency, standsCount = 0, systemFeeOverride, cardPriceOverride, planType = 'connect' } = req.body;
   if (!startDate || !paymentFrequency) {
     return res.status(400).json({ message: 'startDate and paymentFrequency are required' });
+  }
+  if (!['connect', 'full'].includes(planType)) {
+    return res.status(400).json({ message: 'planType must be connect or full' });
   }
 
   const start = new Date(startDate);
   const end = new Date(start);
   end.setFullYear(end.getFullYear() + 1); // every contract is a 1-year term, regardless of payment frequency
 
-  const systemFee = systemFeeOverride != null ? Number(systemFeeOverride) : DEFAULT_SYSTEM_FEE;
-  const cardPrice = cardPriceOverride != null ? Number(cardPriceOverride) : DEFAULT_CARD_PRICE;
-  const annualTotal = (systemFee + standsCount * cardPrice) * 12;
-
-  const { data: business } = await supabaseAdmin.from('businesses').select('name').eq('id', req.params.businessId).single();
+  const { data: business } = await supabaseAdmin.from('businesses').select('name, category').eq('id', req.params.businessId).single();
   if (!business) return res.status(404).json({ message: 'Business not found' });
+
+  // Real plan-aware pricing, not the old flat fallback that had quietly
+  // drifted out of sync with what the pricing page actually charges -
+  // a hotel and a restaurant on the same plan pay different base fees,
+  // reflecting what each unit (room vs table) actually is.
+  const category = business.category === 'hotel' ? 'hotel' : 'restaurant';
+  const planRates = PLAN_RATES[planType][category];
+  const systemFee = systemFeeOverride != null ? Number(systemFeeOverride) : planRates.base;
+  const cardPrice = cardPriceOverride != null ? Number(cardPriceOverride) : planRates.perUnit;
+  const annualTotal = (systemFee + standsCount * cardPrice) * 12;
 
   const { count } = await supabaseAdmin.from('contracts').select('id', { count: 'exact', head: true });
   const contractNumber = `TVZ-C-${start.getFullYear()}-${String((count || 0) + 1).padStart(4, '0')}`;
@@ -49,6 +72,7 @@ const createContract = asyncHandler(async (req, res) => {
       system_fee_aed: systemFee,
       card_price_aed: cardPrice,
       annual_total_aed: annualTotal,
+      plan_type: planType,
       status: 'draft',
       sign_token: signToken,
       sign_token_expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days to sign
@@ -107,20 +131,32 @@ function buildContractText(contract, business) {
   // silently absorbed into the headline figure.
   const { vatAmount: annualVat, totalIncVat: annualTotalIncVat } = calculateVatExclusive(contract.annual_total_aed);
   const { totalIncVat: perPaymentIncVat } = calculateVatExclusive(perPayment);
+  const planName = contract.plan_type === 'full' ? 'Tavzio Full' : 'Tavzio Connect';
+  const planDescription = PLAN_DESCRIPTIONS[contract.plan_type] || PLAN_DESCRIPTIONS.connect;
+  const unitNoun = contract.stands_count === 1 ? 'stand' : 'stands';
 
   return `TAVZIO SERVICE AGREEMENT
 Contract No: ${contract.contract_number}
 
+WELCOME TO TAVZIO
+Dear ${business.name},
+
+Thank you for choosing Tavzio to power ${business.name}'s digital guest experience. This Agreement sets out, in plain terms as well as binding ones, exactly what you're getting, what it costs, and what each side commits to - so there are no surprises on either end of this relationship.
+
+You've selected the ${planName} plan, described in full under Section 1 below. In short: ${planDescription} From the moment this Agreement is signed and your first payment clears, your account is provisioned and your NFC stands are dispatched - most businesses are live within a few working days.
+
+A dedicated point of contact at Tavzio remains available throughout your Term for setup support, feature questions, or anything else that comes up. What follows is the formal Agreement - please read it in full before signing, and don't hesitate to ask before you do.
+
 This Service Agreement ("Agreement") is entered into between Tavzio ("Provider") and ${business.name} ("Client"), effective from ${formatLongDate(contract.start_date)} through ${formatLongDate(contract.end_date)} ("Term").
 
-1. SERVICES
-Provider shall supply the Client with access to the Tavzio digital guest-engagement platform, including menu, ordering, loyalty, booking, and payment features as configured for the Client's account, together with ${contract.stands_count} NFC-enabled table stand(s), rented (not sold) to the Client for the duration of this Agreement.
+1. SERVICES AND SELECTED PLAN
+Provider shall supply the Client with access to the Tavzio digital guest-engagement platform under the ${planName} plan. ${planDescription} Services are configured for the Client's account as agreed, together with ${contract.stands_count} NFC-enabled table ${unitNoun}, rented (not sold) to the Client for the duration of this Agreement. The Client's plan may be upgraded at any time by mutual written agreement, effective from the next billing period; a downgrade takes effect at the start of the next annual Term.
 
 2. TERM
 This Agreement is for a fixed term of one (1) year from the Effective Date, and shall automatically renew for successive one-year terms unless either party gives written notice of non-renewal at least thirty (30) days before the end of the then-current Term.
 
 3. FEES AND PAYMENT
-The Client shall pay Provider a platform fee of AED ${contract.system_fee_aed} per month plus AED ${contract.card_price_aed} per stand per month, totaling AED ${contract.annual_total_aed.toFixed(2)} per year (excluding VAT), plus 5% UAE VAT of AED ${annualVat.toFixed(2)}, for a total of AED ${annualTotalIncVat.toFixed(2)} per year inclusive of VAT, payable ${freqLabel} in installments of AED ${perPayment.toFixed(2)} each excluding VAT (AED ${perPaymentIncVat.toFixed(2)} inclusive of VAT). Payment is due on the date specified on each issued receipt, which will state the VAT amount separately as required under UAE Federal Decree-Law No. 8 of 2017 on Value Added Tax. A payment not received within five (5) days of its due date, after two reminder notices, may result in suspension of the Client's access to the Service. Non-payment continuing for thirty (30) days shall constitute a material breach entitling Provider to terminate this Agreement without further notice and without compensation to the Client.
+The Client shall pay Provider a ${planName} platform fee of AED ${contract.system_fee_aed} per month plus AED ${contract.card_price_aed} per stand per month, totaling AED ${contract.annual_total_aed.toFixed(2)} per year (excluding VAT), plus 5% UAE VAT of AED ${annualVat.toFixed(2)}, for a total of AED ${annualTotalIncVat.toFixed(2)} per year inclusive of VAT, payable ${freqLabel} in installments of AED ${perPayment.toFixed(2)} each excluding VAT (AED ${perPaymentIncVat.toFixed(2)} inclusive of VAT). Payment is due on the date specified on each issued tax invoice, which will state the VAT amount separately as required under UAE Federal Decree-Law No. 8 of 2017 on Value Added Tax and its Executive Regulation. A payment not received within five (5) days of its due date, after two reminder notices, may result in suspension of the Client's access to the Service. Non-payment continuing for thirty (30) days shall constitute a material breach entitling Provider to terminate this Agreement without further notice and without compensation to the Client.
 
 4. HARDWARE
 The NFC stands supplied under this Agreement remain the property of Provider at all times and are rented, not sold. Upon termination or expiry of this Agreement, the Client shall return all stands to Provider in good working condition within fourteen (14) days, ordinary wear and tear excepted. The Client shall bear the cost of repair or replacement for stands lost, stolen, or damaged beyond ordinary wear and tear.
