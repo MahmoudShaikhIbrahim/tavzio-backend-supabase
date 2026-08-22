@@ -4,6 +4,7 @@ const { notifyCardUsed, sendDeviceConfirmation } = require('../utils/notificatio
 const { resolveText } = require('../utils/translate');
 const { maybeAutoCloseTable } = require('../utils/tableAutoClose');
 const { sendPrintJob } = require('../utils/printNodeAdapter');
+const { primaryClientUrl } = require('../utils/clientUrl');
 
 function detectDevice(userAgent = '') {
   const ua = userAgent.toLowerCase();
@@ -177,13 +178,19 @@ const resolveCardTap = asyncHandler(async (req, res) => {
 
   if (eventError) return res.status(400).json({ message: eventError.message });
 
-  // A card placed in a hotel room routes to the guest portal instead of
-  // the normal restaurant-style landing page - a fundamentally different
-  // experience (room service, hotel requests, view bill) for a
-  // fundamentally different kind of business, decided by Business Type
-  // + whether this specific card was assigned to a room.
-  if (business.category === 'hotel' && card.room_id) {
-    return res.json({ redirect: `/${business.slug}/room/${card.room_id}`, tapEventId: event.id, roomId: card.room_id });
+  // Real fix: every hotel card now routes to the unified guest portal -
+  // room-bound (in-room stand) or not (lobby/reception/unassigned stand).
+  // Previously only room-bound cards got here; anything else silently
+  // fell through to the plain restaurant-style landing page below, which
+  // has no concept of Guest Portal Services at all - that mismatch was
+  // the actual root cause of services never appearing on some stands.
+  // roomId is included only when the card is actually bound to one;
+  // the portal itself (getGuestPortal) degrades gracefully without it.
+  if (business.category === 'hotel') {
+    const redirect = card.room_id
+      ? `/${business.slug}/room/${card.room_id}`
+      : `/${business.slug}/hotel-portal`;
+    return res.json({ redirect, tapEventId: event.id, roomId: card.room_id || null });
   }
 
   res.json({ redirect: `/${business.slug}`, tapEventId: event.id });
@@ -1245,7 +1252,7 @@ const createOrderPaySession = asyncHandler(async (req, res) => {
     .single();
   if (paymentError) return res.status(400).json({ message: paymentError.message });
 
-  const returnUrl = `${process.env.CLIENT_URL}/${req.params.slug}/menu?orderPaymentId=${payment.id}`;
+  const returnUrl = `${primaryClientUrl()}/${req.params.slug}/menu?orderPaymentId=${payment.id}`;
   const adapter = provider === 'telr'
     ? require('../utils/telrAdapter')
     : provider === 'ngenius'
@@ -2179,7 +2186,7 @@ const createPaySession = asyncHandler(async (req, res) => {
     .single();
   if (paymentError) return res.status(400).json({ message: paymentError.message });
 
-  const returnUrl = `${process.env.CLIENT_URL}/${req.params.slug}/pay?paymentId=${payment.id}`;
+  const returnUrl = `${primaryClientUrl()}/${req.params.slug}/pay?paymentId=${payment.id}`;
   const adapter = provider === 'telr'
     ? require('../utils/telrAdapter')
     : provider === 'ngenius'

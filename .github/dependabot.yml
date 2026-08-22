@@ -1,0 +1,37 @@
+# Dependabot security config for tavzio-backend-supabase.
+#
+# This enables automated dependency vulnerability scanning: GitHub checks
+# every package in package.json against its known-vulnerability database
+# and opens a pull request automatically when a fix is available, rather
+# than a vulnerable package sitting silently until someone happens to run
+# `npm audit` by hand. This file alone is not enough - it only takes
+# effect once the repo is pushed to GitHub AND Dependabot security
+# updates are turned on in the repo's Settings > Code security page
+# (Settings > Advanced Security > Dependabot). The file defines *how*
+# Dependabot behaves; the repo setting is what turns it on at all.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      # Weekly rather than daily - daily PRs for a solo maintainer become
+      # noise that gets ignored, which defeats the point. Weekly is a
+      # reasonable cadence for someone reviewing this alone.
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    # Security-relevant updates are labeled distinctly from routine
+    # version bumps so they're easy to spot and prioritize in a PR list.
+    labels:
+      - "dependencies"
+      - "security"
+    commit-message:
+      prefix: "chore(deps)"
+    # Group minor/patch bumps together to cut down on individual PRs for
+    # low-risk updates; major version bumps stay separate since those can
+    # introduce breaking changes that need real review, not a rubber stamp.
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"

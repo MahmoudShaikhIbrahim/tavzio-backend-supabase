@@ -19,7 +19,9 @@ const DEFAULT_GUEST_SERVICES = [
 
 // Shared context resolver - every guest-portal endpoint needs the same
 // business -> room -> active reservation chain, verified fresh every
-// time rather than trusted from the client.
+// time rather than trusted from the client. roomId is optional: a
+// lobby/unassigned stand has no room to resolve, and that's a valid,
+// supported state now (see migration 0082) - not an error.
 async function resolveGuestContext(slug, roomId) {
   const { data: business } = await supabaseAdmin
     .from('businesses')
@@ -28,6 +30,10 @@ async function resolveGuestContext(slug, roomId) {
     .eq('status', 'active')
     .single();
   if (!business || business.category !== 'hotel') return null;
+
+  if (!roomId) {
+    return { business, room: null, reservation: null };
+  }
 
   const { data: room } = await supabaseAdmin
     .from('hotel_rooms')
@@ -86,11 +92,13 @@ const getGuestPortal = asyncHandler(async (req, res) => {
     id: s.id, routingType: s.routing_type, label: s.label, options: s.options || [],
   })) : DEFAULT_GUEST_SERVICES;
 
-  // Real fix: a hotel room card never routes to the general LandingPage
-  // at all (resolveCardTap sends it straight to this room-scoped portal
-  // instead) - so "Landing Page Buttons" custom buttons, configured
-  // under that same name in Settings, were being fetched by a page a
-  // hotel guest can never actually reach. Same buttons, same page now.
+  // Real fix: a hotel card never used to route to the general LandingPage
+  // at all when room-bound (resolveCardTap sends it straight to this
+  // room-scoped portal instead) - so "Landing Page Buttons" custom
+  // buttons, configured under that same name in Settings, were being
+  // fetched by a page a hotel guest could never actually reach. As of
+  // this fix, EVERY hotel card (room-bound or not) reaches this same
+  // portal, so both button systems always render together, one page.
   const { data: customButtons } = await supabaseAdmin
     .from('custom_buttons')
     .select('id, label, icon, image_url, url, button_type, notification_destination, target_section, parent_button_id')
@@ -100,7 +108,10 @@ const getGuestPortal = asyncHandler(async (req, res) => {
 
   res.json({
     business: { name: business.name, slug: business.slug, logoUrl: business.logo_url, links: business.links, theme: business.theme },
-    room: { id: room.id, roomNumber: room.room_number, roomType: room.room_type },
+    // room is null for a lobby/unassigned stand - the frontend hides
+    // room number, guest welcome text, and My Bill accordingly rather
+    // than rendering blank/broken fields for something that doesn't exist.
+    room: room ? { id: room.id, roomNumber: room.room_number, roomType: room.room_type } : null,
     guest: reservation ? { name: reservation.hotel_guests?.name, checkInDate: reservation.check_in_date, checkOutDate: reservation.check_out_date } : null,
     folioId,
     folioBalance,
@@ -131,16 +142,21 @@ const submitGuestRequest = asyncHandler(async (req, res) => {
   const { business, room, reservation } = ctx;
 
   const fullNote = quantity ? `Qty: ${quantity}${note ? ' - ' + note : ''}` : note;
+  // A request with no room (lobby/unassigned stand) still needs to say
+  // so explicitly in the note staff actually read - a silent null
+  // room_id in a list otherwise full of room numbers reads as a bug,
+  // not as "front desk, no room," to whoever's working the queue.
+  const noteWithContext = room ? fullNote : `[Front desk - no room]${fullNote ? ' ' + fullNote : ''}`;
 
   if (requestType === 'housekeeping' || requestType === 'towels' || requestType === 'turndown') {
     // task_type is constrained to cleaning/turndown/inspection/deep_clean
     // at the database level - "extra towels" etc. isn't its own type,
     // it's a cleaning task with the detail captured in notes instead.
     const taskType = requestType === 'turndown' ? 'turndown' : 'cleaning';
-    const notes = requestType === 'towels' ? `Extra towels${fullNote ? ' - ' + fullNote : ''}` : fullNote;
+    const notes = requestType === 'towels' ? `Extra towels${noteWithContext ? ' - ' + noteWithContext : ''}` : noteWithContext;
     const { data, error } = await supabaseAdmin
       .from('housekeeping_tasks')
-      .insert({ business_id: business.id, room_id: room.id, task_type: taskType, notes })
+      .insert({ business_id: business.id, room_id: room?.id || null, task_type: taskType, notes })
       .select()
       .single();
     if (error) return res.status(400).json({ message: error.message });
@@ -150,7 +166,7 @@ const submitGuestRequest = asyncHandler(async (req, res) => {
   if (requestType === 'maintenance') {
     const { data, error } = await supabaseAdmin
       .from('maintenance_tickets')
-      .insert({ business_id: business.id, room_id: room.id, title: note || 'Guest-reported issue', description: fullNote, priority: 'normal' })
+      .insert({ business_id: business.id, room_id: room?.id || null, title: note || 'Guest-reported issue', description: noteWithContext, priority: 'normal' })
       .select()
       .single();
     if (error) return res.status(400).json({ message: error.message });
@@ -159,7 +175,7 @@ const submitGuestRequest = asyncHandler(async (req, res) => {
 
   const { data, error } = await supabaseAdmin
     .from('guest_service_requests')
-    .insert({ business_id: business.id, room_id: room.id, reservation_id: reservation?.id || null, request_type: requestType, note: fullNote })
+    .insert({ business_id: business.id, room_id: room?.id || null, reservation_id: reservation?.id || null, request_type: requestType, note: noteWithContext })
     .select()
     .single();
   if (error) return res.status(400).json({ message: error.message });
@@ -277,7 +293,14 @@ const submitGuestOrder = asyncHandler(async (req, res) => {
 const getMyRequests = asyncHandler(async (req, res) => {
   const ctx = await resolveGuestContext(req.params.slug, req.params.roomId);
   if (!ctx) return res.status(404).json({ message: 'Not found' });
-  const { business, room, reservation } = ctx;
+  const { business, room } = ctx;
+
+  // A lobby/unassigned stand has no room to scope "my requests" by -
+  // there's no reliable, safe way to show "your" requests to an
+  // anonymous visitor with no room or reservation tying them to
+  // anything, so this returns an empty list rather than every request
+  // for the whole business (which would leak other guests' requests).
+  if (!room) return res.json([]);
 
   const [{ data: general }, { data: housekeeping }, { data: maintenance }, { data: orders }] = await Promise.all([
     supabaseAdmin.from('guest_service_requests').select('id, request_type, note, status, created_at, resolved_at').eq('room_id', room.id).order('created_at', { ascending: false }).limit(20),

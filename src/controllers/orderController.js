@@ -4,6 +4,7 @@ const { logAction } = require('../utils/auditLog');
 const { maybeAutoCloseTable } = require('../utils/tableAutoClose');
 const { calculateVatInclusive } = require('../utils/vat');
 const { decryptConfig } = require('../utils/credentialEncryption');
+const { primaryClientUrl } = require('../utils/clientUrl');
 
 // @route GET /api/businesses/:businessId/orders?status=
 // Only real food orders - call_waiter/request_bill quick requests are
@@ -515,7 +516,7 @@ const createPosOrder = asyncHandler(async (req, res) => {
       .select()
       .single();
 
-    const appUrl = process.env.CLIENT_URL || '';
+    const appUrl = primaryClientUrl();
     const session = await adapter.createPaymentSession(config.config, total, `POS order - ${tableLabel}`, txn.id, `${appUrl}/admin/dashboard/pos?posPaymentTxnId=${txn.id}`);
     if (!session.success) {
       await sa.from('payment_transactions').update({ status: 'failed', failure_reason: session.error }).eq('id', txn.id);

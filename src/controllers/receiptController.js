@@ -3,6 +3,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const { createPaymentIntent, registerWebhook, verifyWebhookSignature, isFromZiinaIp } = require('../utils/ziinaAdapter');
 const { supabaseAdmin } = require('../config/supabaseClient');
 const { calculateVatExclusive, calculateVatInclusive } = require('../utils/vat');
+const { primaryClientUrl } = require('../utils/clientUrl');
 
 // @route GET /api/businesses/:businessId/receipts
 // Business owner/staff see their own; super_admin can view any business's
@@ -97,7 +98,7 @@ const createReceipt = asyncHandler(async (req, res) => {
   // exact receipt total - this is a best-effort step: if Ziina is
   // unreachable or misconfigured, the receipt still exists and can be
   // paid another way; it just won't have an automatic link yet.
-  const appUrl = process.env.CLIENT_URL || '';
+  const appUrl = primaryClientUrl();
   const ziinaResult = await createPaymentIntent({
     amountAed: amount,
     message: `${business?.name || 'Tavzio'} - Receipt ${receiptNumber}`,
@@ -469,7 +470,7 @@ const generateContractReceipt = asyncHandler(async (req, res) => {
     .single();
   if (error) return res.status(400).json({ message: error.message });
 
-  const appUrl = process.env.CLIENT_URL || '';
+  const appUrl = primaryClientUrl();
   const ziinaResult = await createPaymentIntent({
     amountAed: amountIncVat,
     message: `${business?.name || 'Tavzio'} - Receipt ${receiptNumber}`,

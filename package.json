@@ -9,6 +9,7 @@
     "dev": "nodemon src/server.js"
   },
   "dependencies": {
+    "qrcode": "^1.5.3",
     "@anthropic-ai/sdk": "^0.32.0",
     "@supabase/supabase-js": "^2.45.0",
     "cors": "^2.8.5",

@@ -13,6 +13,8 @@ const publicRoutes = require('./routes/publicRoutes');
 const messagesRoutes = require('./routes/messagesRoutes');
 const ziinaRoutes = require('./routes/ziinaRoutes');
 const publicContractRoutes = require('./routes/publicContractRoutes');
+const superAdminDigitalCardRoutes = require('./routes/superAdminDigitalCardRoutes');
+const publicCardRoutes = require('./routes/publicCardRoutes');
 const stripeRoutes = require('./routes/stripeRoutes');
 const leadRoutes = require('./routes/leadRoutes');
 const deliverectRoutes = require('./routes/deliverectRoutes');
@@ -23,7 +25,12 @@ const app = express();
 // Railway (and most PaaS hosts) sit behind a proxy - without this, every
 // request would appear to come from Railway's own internal address,
 // which breaks per-IP rate limiting (everyone would share one bucket).
-app.set('trust proxy', true);
+// Railway sits exactly one proxy hop in front of this app. Trusting
+// depth 1 (rather than `true`, which trusts any number of hops) means
+// Express only reads the client IP from that one known hop, so a
+// request can't spoof its way past IP-based rate limiting by faking
+// extra proxy headers.
+app.set('trust proxy', 1);
 
 app.use(helmet());
 app.use(
@@ -63,6 +70,8 @@ app.use('/api/public', publicLimiter, publicRoutes);
 app.use('/api/messages', apiLimiter, messagesRoutes);
 app.use('/api/ziina', apiLimiter, ziinaRoutes);
 app.use('/api/public/contracts', publicLimiter, publicContractRoutes);
+app.use('/api/super-admin/digital-cards', apiLimiter, superAdminDigitalCardRoutes);
+app.use('/api/public/cards', publicLimiter, publicCardRoutes);
 app.use('/api/stripe', stripeRoutes);
 app.use('/api/leads', apiLimiter, leadRoutes);
 app.use('/api/deliverect', deliverectRoutes);

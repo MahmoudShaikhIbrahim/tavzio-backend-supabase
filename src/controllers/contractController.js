@@ -6,6 +6,7 @@ const { logAction } = require('../utils/auditLog');
 const { sendContractSignLink } = require('../utils/notifications');
 const { createSubscriptionCheckoutSession } = require('../utils/stripeAdapter');
 const { calculateVatExclusive } = require('../utils/vat');
+const { primaryClientUrl } = require('../utils/clientUrl');
 
 const DEFAULT_SYSTEM_FEE = 200;
 const DEFAULT_CARD_PRICE = 20;
@@ -276,7 +277,8 @@ const previewStandaloneContract = asyncHandler(async (req, res) => {
   const { data: contract } = await supabaseAdmin.from('contracts').select('*').eq('id', req.params.contractId).single();
   if (!contract) return res.status(404).json({ message: 'Contract not found' });
   const business = await resolveContractParty(contract);
-  res.json({ text: buildContractText(contract, business) });
+  const { data: branding } = await supabaseAdmin.from('receipt_branding').select('*').limit(1).maybeSingle();
+  res.json({ text: buildContractText(contract, business, branding) });
 });
 
 // @route POST /api/businesses/:businessId/contracts/:contractId/send  (super_admin only)
@@ -303,7 +305,7 @@ const sendContract = asyncHandler(async (req, res) => {
   }
   if (!email) return res.status(400).json({ message: 'No email on file for this contract' });
 
-  const signUrl = `${process.env.CLIENT_URL}/sign/${contract.sign_token}`;
+  const signUrl = `${primaryClientUrl()}/sign/${contract.sign_token}`;
   await sendContractSignLink({ email, businessName, signUrl });
 
   await supabaseAdmin.from('contracts').update({ status: 'sent', sent_at: new Date().toISOString() }).eq('id', contract.id);
@@ -327,7 +329,7 @@ function formatLongDate(d) {
 // Builds the full contract text from the template, with the business's
 // real details filled in. Kept as one function so the exact text a
 // business signs is always reproducible from its stored parameters.
-function buildContractText(contract, business) {
+function buildContractText(contract, business, branding) {
   const freqLabel = { monthly: 'monthly', quarterly: 'quarterly', yearly: 'annually' }[contract.payment_frequency];
   const perPayment = contract.annual_total_aed / periodsPerYear(contract.payment_frequency);
   // Contract amounts are the net/subtotal fee (standard UAE B2B
@@ -338,6 +340,16 @@ function buildContractText(contract, business) {
   const planName = contract.plan_type === 'full' ? 'Tavzio Full' : 'Tavzio Connect';
   const planDescription = PLAN_DESCRIPTIONS[contract.plan_type] || PLAN_DESCRIPTIONS.connect;
   const unitNoun = contract.stands_count === 1 ? 'stand' : 'stands';
+  // Only states real coverage if a policy has actually been recorded in
+  // Billing Settings (provider + policy number) - never claims insurance
+  // that doesn't exist yet. This is Tavzio's (Provider's) own coverage,
+  // so it's sourced from the receipt_branding singleton (Tavzio's company
+  // record), not from the client business being contracted with. Falls
+  // back to an honest placeholder clause that still commits Provider to
+  // obtaining cover, without pretending it's already in place.
+  const insuranceClause = branding?.cyber_insurance_provider && branding?.cyber_insurance_policy_number
+    ? `Provider maintains cyber liability insurance with ${branding.cyber_insurance_provider} (Policy No. ${branding.cyber_insurance_policy_number}) appropriate to the scale of the Service. Evidence of coverage is available to the Client upon reasonable written request.`
+    : `Provider is in the process of obtaining cyber liability insurance appropriate to the scale of the Service and will provide evidence of coverage to the Client once the policy is in place.`;
 
   return `TAVZIO SERVICE AGREEMENT
 Contract No: ${contract.contract_number}
@@ -384,10 +396,41 @@ Neither party shall be liable for delay or failure to perform caused by events b
 This Agreement is governed by the laws of the Emirate of Sharjah and the federal laws of the UAE as applicable therein. Any dispute arising out of or in connection with this Agreement shall first be addressed in good faith between the parties, and if unresolved, shall be referred to the competent courts of Sharjah, UAE.
 
 11. ENTIRE AGREEMENT
-This Agreement, together with its annexed Data Processing Addendum, constitutes the entire agreement between the parties regarding its subject matter.
+This Agreement, together with its annexed Data Processing Addendum (Annex A) and Refund Policy (Annex B), and the Tavzio Terms of Service and Privacy Policy published at tavzio.ae/legal, constitutes the entire agreement between the parties regarding its subject matter. In the event of conflict, this Agreement and its Annexes take precedence over the Terms of Service and Privacy Policy for matters they both address.
+
+12. INSURANCE
+${insuranceClause}
 
 Client: ${business.name}
-Contract Reference: ${contract.contract_number}`;
+Contract Reference: ${contract.contract_number}
+
+---
+
+ANNEX A: DATA PROCESSING ADDENDUM
+
+This Data Processing Addendum ("DPA") forms part of and is incorporated into the Agreement between Provider (acting as data processor) and Client (acting as data controller) referenced above, in accordance with UAE Federal Decree-Law No. 45 of 2021 on the Protection of Personal Data.
+
+A.1 Subject Matter. Provider processes personal data submitted to the Tavzio platform by Client - including guest/customer identity and contact details, reservation and order history, loyalty and preference data, and staff records where the relevant module is enabled - for the duration of the Agreement.
+
+A.2 Processor Obligations. Provider shall: (a) process personal data only on Client's documented instructions; (b) ensure personnel with access to such data are bound by confidentiality obligations; (c) implement appropriate technical and organizational security measures, including encryption of sensitive credentials and tenant-level data isolation between Provider's customers; (d) assist Client in responding to data subject requests to the extent reasonably required; (e) notify Client without undue delay upon becoming aware of a personal data breach affecting Client's data; and (f) delete or return Client's personal data at the end of the Agreement, at Client's election, subject to legal retention requirements.
+
+A.3 Subprocessors. Client authorizes Provider to engage subprocessors reasonably necessary to provide the Service, including cloud hosting and payment gateway providers. Provider remains responsible for such subprocessors' compliance with the obligations in this Annex.
+
+A.4 International Transfers. Where personal data is transferred outside the UAE in the course of providing the Service, Provider shall apply safeguards consistent with UAE Federal Decree-Law No. 45 of 2021.
+
+---
+
+ANNEX B: REFUND POLICY
+
+B.1 Subscription fees paid for a billing period that has already started are non-refundable, except as expressly provided in this Annex or as required by law.
+
+B.2 If the Service experiences a material outage attributable to Provider lasting longer than twenty-four (24) consecutive hours within a billing period, Client may request a pro-rated credit for the affected period, applied to a future invoice. This does not apply to outages caused by third-party integrations, Client's own infrastructure, or scheduled maintenance communicated in advance.
+
+B.3 If Client is charged in error, Provider will investigate and issue a refund or credit for the erroneous amount within fourteen (14) business days of confirming the error.
+
+B.4 Rental fees already paid for NFC stands are non-refundable. Client may be charged a replacement fee for hardware not returned per Section 4 of this Agreement.
+
+B.5 Refund requests should be submitted in writing to Provider's designated billing contact, referencing the invoice number and reason for the request.`;
 }
 
 // @route GET /api/businesses/:businessId/contracts/:contractId/preview
@@ -395,7 +438,8 @@ const previewContract = asyncHandler(async (req, res) => {
   const { data: contract } = await req.supabase.from('contracts').select('*').eq('id', req.params.contractId).single();
   const { data: business } = await req.supabase.from('businesses').select('name').eq('id', req.params.businessId).single();
   if (!contract || !business) return res.status(404).json({ message: 'Not found' });
-  res.json({ text: buildContractText(contract, business) });
+  const { data: branding } = await req.supabase.from('receipt_branding').select('*').limit(1).maybeSingle();
+  res.json({ text: buildContractText(contract, business, branding) });
 });
 
 // @route GET /api/public/contracts/:token
@@ -411,12 +455,13 @@ const getPublicContractByToken = asyncHandler(async (req, res) => {
 
   const business = await resolveContractParty(contract);
   const isSigned = ['signed', 'paid', 'active'].includes(contract.status);
+  const { data: branding } = await supabaseAdmin.from('receipt_branding').select('*').limit(1).maybeSingle();
 
   res.json({
     contractNumber: contract.contract_number,
     businessName: business?.name || '',
     status: contract.status,
-    text: isSigned && contract.signed_snapshot_text ? contract.signed_snapshot_text : buildContractText(contract, business),
+    text: isSigned && contract.signed_snapshot_text ? contract.signed_snapshot_text : buildContractText(contract, business, branding),
     isSigned,
     signedByName: contract.signed_by_name,
     signedAt: contract.signed_at,
@@ -444,7 +489,8 @@ const signPublicContract = asyncHandler(async (req, res) => {
 
   const business = await resolveContractParty(contract);
 
-  const snapshotText = buildContractText(contract, business);
+  const { data: branding } = await supabaseAdmin.from('receipt_branding').select('*').limit(1).maybeSingle();
+  const snapshotText = buildContractText(contract, business, branding);
   const signerIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '';
 
   const { data: updated, error } = await supabaseAdmin
@@ -469,7 +515,7 @@ const signPublicContract = asyncHandler(async (req, res) => {
     details: { contractNumber: contract.contract_number, signedBy: fullName, via: 'public_link' },
   });
 
-  const appUrl = process.env.CLIENT_URL || '';
+  const appUrl = primaryClientUrl();
   const checkout = await createSubscriptionCheckoutSession({
     contract: updated,
     business,
@@ -502,7 +548,8 @@ const signContract = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'This contract has already been signed' });
   }
 
-  const snapshotText = buildContractText(contract, business);
+  const { data: branding } = await req.supabase.from('receipt_branding').select('*').limit(1).maybeSingle();
+  const snapshotText = buildContractText(contract, business, branding);
   const signerIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '';
 
   const { data: updated, error } = await supabaseAdmin
@@ -554,7 +601,7 @@ const downloadContractPdf = asyncHandler(async (req, res) => {
   const { data: branding } = await req.supabase.from('receipt_branding').select('*').limit(1).maybeSingle();
 
   const isSigned = ['signed', 'paid', 'active'].includes(contract.status);
-  const text = isSigned && contract.signed_snapshot_text ? contract.signed_snapshot_text : buildContractText(contract, business);
+  const text = isSigned && contract.signed_snapshot_text ? contract.signed_snapshot_text : buildContractText(contract, business, branding);
   const legalName = branding?.legal_name || 'Tavzio';
   const brass = '#b8925a';
   const ink = '#20170f';

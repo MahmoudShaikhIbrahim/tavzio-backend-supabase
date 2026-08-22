@@ -2,6 +2,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const { supabaseAdmin } = require('../config/supabaseClient');
 const { logAction } = require('../utils/auditLog');
 const { decryptConfig } = require('../utils/credentialEncryption');
+const { primaryClientUrl } = require('../utils/clientUrl');
 
 function getAdapter(provider) {
   if (provider === 'telr') return require('../utils/telrAdapter');
@@ -45,7 +46,7 @@ const createFolioPaymentSession = asyncHandler(async (req, res) => {
     .single();
   if (txnError) return res.status(400).json({ message: txnError.message });
 
-  const appUrl = process.env.CLIENT_URL || '';
+  const appUrl = primaryClientUrl();
   const returnUrl = `${appUrl}/${business.slug}/room/${room.id}?folioPaymentTxnId=${txn.id}`;
   const session = await adapter.createPaymentSession(config, amountAed, `Room folio payment`, txn.id, returnUrl);
 

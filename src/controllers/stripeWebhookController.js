@@ -2,6 +2,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const { supabaseAdmin } = require('../config/supabaseClient');
 const { constructWebhookEvent } = require('../utils/stripeAdapter');
 const { sendContractSignedReceipt, sendPaymentFailedWarning, sendAccountSuspended } = require('../utils/notifications');
+const { primaryClientUrl } = require('../utils/clientUrl');
 
 async function nextReceiptNumber() {
   const year = new Date().getFullYear();
@@ -115,7 +116,7 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
 
       const { data: ownerUser } = await supabaseAdmin.auth.admin.getUserById(business.owner);
       if (ownerUser?.user?.email && receipt) {
-        const appUrl = process.env.CLIENT_URL || '';
+        const appUrl = primaryClientUrl();
         await sendContractSignedReceipt({
           email: ownerUser.user.email,
           businessName: business.name,

@@ -63,4 +63,15 @@ router.get('/hotel/:slug/room/:roomId/my-requests', getMyRequests);
 router.post('/hotel/:slug/room/:roomId/folio/pay', createFolioPaymentSession);
 router.post('/hotel/:slug/room/:roomId/folio/confirm', confirmFolioPayment);
 
+// Real fix: a lobby/reception/unassigned stand has no room to bind to,
+// so it can never charge a folio or place a room-service order (there's
+// no bill to attach them to) - but it still needs Guest Portal Services
+// and Landing Page Buttons on the same one page. These reuse the exact
+// same controller functions as the room-bound routes above; roomId is
+// simply absent from req.params, which resolveGuestContext already
+// treats as "no room" rather than an error.
+router.get('/hotel/:slug/hotel-portal', getGuestPortal);
+router.post('/hotel/:slug/hotel-portal/requests', submitGuestRequest);
+router.get('/hotel/:slug/hotel-portal/my-requests', getMyRequests);
+
 module.exports = router;
