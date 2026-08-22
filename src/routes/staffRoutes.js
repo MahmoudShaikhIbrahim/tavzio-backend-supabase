@@ -1,5 +1,5 @@
 const express = require('express');
-const { inviteStaff, listStaff, setStaffActive, setStaffJobRole, setStaffSections, setStaffOutlets, listRolePermissions, resetPassword } = require('../controllers/staffController');
+const { inviteStaff, listStaff, setStaffActive, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, listRolePermissions, resetPassword } = require('../controllers/staffController');
 const { issueAdminCard } = require('../controllers/cardController');
 const { protect, authorize, enforceTenant } = require('../middleware/auth');
 
@@ -18,6 +18,18 @@ router.patch('/:userId/job-role', authorize('business_owner', 'super_admin'), se
 // as everything else in this file.
 router.patch('/:userId/sections', authorize('business_owner', 'super_admin'), setStaffSections);
 router.patch('/:userId/outlets', authorize('business_owner', 'super_admin'), setStaffOutlets);
+// Owner-equivalent access for one specific staff account - see the
+// 0083 migration and authorize()/current_role_name() for what this
+// actually unlocks (every owner-only route and RLS policy in the app).
+// Same "owner or super_admin manage, staff never touch their own"
+// pattern as everything else here - a delegate can't grant this
+// onward to someone else.
+router.patch('/:userId/full-access', authorize('business_owner', 'super_admin'), setStaffFullAccess);
+// The one exception to that pattern: nav layout (hide/reorder tabs) is
+// a personal display preference, not an access grant, so it's
+// deliberately self-service - setMyNavLayout itself enforces that
+// :userId can only ever be the caller's own id, not gated by role here.
+router.patch('/:userId/nav-layout', setMyNavLayout);
 // The actual fix for "an onboarded account is locked out and nobody can
 // get back in" - generates a real temporary password directly via the
 // Supabase Admin API, forces a fresh one on next login. Owner or

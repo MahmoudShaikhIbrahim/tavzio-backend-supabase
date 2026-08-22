@@ -21,7 +21,7 @@ const protect = asyncHandler(async (req, res, next) => {
 
   const { data: profile, error: profileError } = await supabaseAdmin
     .from('profiles')
-    .select('id, name, role, business_id, organization_id, is_active, theme_preference, preferred_language, must_change_password, job_role, assigned_sections, assigned_outlet_ids')
+    .select('id, name, role, business_id, organization_id, is_active, theme_preference, preferred_language, must_change_password, job_role, assigned_sections, assigned_outlet_ids, full_access, nav_layout, tour_completed_at')
     .eq('id', data.user.id)
     .single();
 
@@ -35,9 +35,17 @@ const protect = asyncHandler(async (req, res, next) => {
   next();
 });
 
-// Restricts a route to specific roles, e.g. authorize('super_admin')
+// Restricts a route to specific roles, e.g. authorize('super_admin').
+// A staff account with full_access=true passes any check that includes
+// 'business_owner' in its allowed list - this is the single place that
+// makes delegated full access real across every owner-gated route in
+// the app, rather than something that would need updating route by
+// route. It never grants super_admin - only business_owner-equivalence.
 const authorize = (...roles) => (req, res, next) => {
-  if (!req.user || !roles.includes(req.user.role)) {
+  if (!req.user) return res.status(403).json({ message: 'Forbidden: insufficient role' });
+  const passes = roles.includes(req.user.role)
+    || (req.user.full_access && roles.includes('business_owner'));
+  if (!passes) {
     return res.status(403).json({ message: 'Forbidden: insufficient role' });
   }
   next();
@@ -64,7 +72,7 @@ const enforceTenant = (req, res, next) => {
 // checked against their specific job_role's permission set.
 const requirePermission = (permissionKey) => async (req, res, next) => {
   if (!req.user) return res.status(401).json({ message: 'Not authorized' });
-  if (req.user.role === 'super_admin' || req.user.role === 'business_owner') return next();
+  if (req.user.role === 'super_admin' || req.user.role === 'business_owner' || req.user.full_access) return next();
 
   if (req.user.role !== 'staff' || !req.user.job_role) {
     return res.status(403).json({ message: `Forbidden: missing permission "${permissionKey}"` });

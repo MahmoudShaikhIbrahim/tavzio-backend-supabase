@@ -37,7 +37,7 @@ const inviteStaff = asyncHandler(async (req, res) => {
 const listStaff = asyncHandler(async (req, res) => {
   const { data, error } = await req.supabase
     .from('profiles')
-    .select('id, name, role, job_role, is_active, last_login_at, created_at, assigned_sections, assigned_outlet_ids')
+    .select('id, name, role, job_role, is_active, last_login_at, created_at, assigned_sections, assigned_outlet_ids, full_access, nav_layout')
     .eq('business_id', req.params.businessId)
     .in('role', ['staff', 'business_owner']);
 
@@ -182,4 +182,71 @@ const setStaffOutlets = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
-module.exports = { inviteStaff, listStaff, setStaffActive, setStaffJobRole, setStaffSections, setStaffOutlets, listRolePermissions, resetPassword };
+// @route PATCH /api/businesses/:businessId/staff/:userId/full-access
+// Body: { fullAccess: boolean }
+// Grants (or revokes) owner-equivalent access to a specific staff
+// account - Manager, CEO, CFO, whoever the owner delegates to. This is
+// a real, server-enforced capability (see authorize() and
+// current_role_name() in the backend), not a cosmetic label: a
+// full_access account passes every existing business_owner-gated check
+// across the whole app, both at the route level and in RLS. Restricted
+// to owner accounts here (not full_access staff granting it onward to
+// someone else) - deliberately a one-level delegation the actual owner
+// controls, not something a delegate can further hand out themselves.
+const setStaffFullAccess = asyncHandler(async (req, res) => {
+  const { fullAccess } = req.body;
+  if (typeof fullAccess !== 'boolean') {
+    return res.status(400).json({ message: 'fullAccess must be true or false' });
+  }
+  if (req.user.role !== 'business_owner' && req.user.role !== 'super_admin') {
+    return res.status(403).json({ message: 'Only the business owner can grant full access' });
+  }
+  const { data, error } = await req.supabase
+    .from('profiles')
+    .update({ full_access: fullAccess })
+    .eq('id', req.params.userId)
+    .eq('business_id', req.params.businessId)
+    .eq('role', 'staff')
+    .select('id, name, full_access')
+    .single();
+  if (error || !data) return res.status(404).json({ message: 'Staff member not found' });
+
+  await logAction({
+    businessId: req.params.businessId,
+    actor: req.user,
+    action: fullAccess ? 'full_access_granted' : 'full_access_revoked',
+    targetId: data.id,
+    details: { accountName: data.name },
+  });
+
+  res.json(data);
+});
+
+// @route PATCH /api/businesses/:businessId/staff/:userId/nav-layout
+// Body: { hidden: string[], order: string[] } | null
+// Per-person dashboard tab customization - hide/reorder. Deliberately
+// self-service: unlike sections/outlets/full-access (which only an
+// owner can set on someone else), a person sets this on THEIR OWN
+// account only (enforced by matching :userId against req.user.id, not
+// business-owner-only like the others), since it's a personal layout
+// preference, not an access control.
+const setMyNavLayout = asyncHandler(async (req, res) => {
+  if (req.params.userId !== req.user.id) {
+    return res.status(403).json({ message: 'You can only change your own nav layout' });
+  }
+  const { hidden, order } = req.body;
+  const layout = (hidden === null && order === null) ? null : {
+    hidden: Array.isArray(hidden) ? hidden : [],
+    order: Array.isArray(order) ? order : [],
+  };
+  const { data, error } = await req.supabase
+    .from('profiles')
+    .update({ nav_layout: layout })
+    .eq('id', req.user.id)
+    .select('id, nav_layout')
+    .single();
+  if (error || !data) return res.status(400).json({ message: error?.message || 'Could not save layout' });
+  res.json(data);
+});
+
+module.exports = { inviteStaff, listStaff, setStaffActive, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, listRolePermissions, resetPassword };

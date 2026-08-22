@@ -1,5 +1,6 @@
 const express = require('express');
 const { submitLead } = require('../controllers/leadController');
+const { getDemoMenu, placeDemoOrder, getDemoOrders, markDemoOrderReady, payDemoOrder } = require('../controllers/demoController');
 const { getGuestPortal, submitGuestRequest, submitGuestOrder, getMyRequests } = require('../controllers/hotelGuestPortalController');
 const { listPublicOutlets } = require('../controllers/hotelOutletsController');
 const { submitCustomButtonRequest } = require('../controllers/customButtonController');
@@ -73,5 +74,13 @@ router.post('/hotel/:slug/room/:roomId/folio/confirm', confirmFolioPayment);
 router.get('/hotel/:slug/hotel-portal', getGuestPortal);
 router.post('/hotel/:slug/hotel-portal/requests', submitGuestRequest);
 router.get('/hotel/:slug/hotel-portal/my-requests', getMyRequests);
+
+// Marketing demo (/demo on the frontend) - no auth, fully sandboxed,
+// touches nothing outside demo_menu_items/demo_orders/demo_order_items.
+router.get('/demo/menu', getDemoMenu);
+router.post('/demo/orders', placeDemoOrder);
+router.get('/demo/orders', getDemoOrders);
+router.patch('/demo/orders/:orderId/ready', markDemoOrderReady);
+router.post('/demo/orders/:orderId/pay', payDemoOrder);
 
 module.exports = router;

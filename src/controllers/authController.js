@@ -1,5 +1,6 @@
 const { supabaseAdmin, supabasePublic } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
+const { verifyTurnstileToken } = require('../utils/turnstile');
 const crypto = require('crypto');
 
 // @route POST /api/auth/register
@@ -76,9 +77,17 @@ const register = asyncHandler(async (req, res) => {
 // protection) for any business that hasn't been granted website access -
 // it just no longer assumes NO business ever wants this.
 const login = asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, turnstileToken } = req.body;
   if (!email || !password) {
     return res.status(400).json({ message: 'Email and password required' });
+  }
+
+  // Verified before touching Supabase Auth at all - a bot's credential-
+  // stuffing attempt gets rejected here, before it ever gets a chance to
+  // burn a real password-check against a real account.
+  const humanVerified = await verifyTurnstileToken(turnstileToken, req.ip);
+  if (!humanVerified) {
+    return res.status(400).json({ message: 'Verification failed - please try again.' });
   }
 
   const { data, error } = await supabasePublic.auth.signInWithPassword({ email, password });
@@ -167,8 +176,26 @@ const updateMyTheme = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
-// @route PATCH /api/auth/language
-// Body: { language: 'en' | 'ar' | 'ru' | 'es' | 'hi' | 'ur' | 'tl' | 'zh' | 'fr' }
+// @route PATCH /api/auth/tour
+// Body: { completed: boolean } - true when finished or explicitly
+// skipped (both stop the auto-open, per the migration 0084 comment);
+// false is what "Restart guide" in Business Profile sends to clear it
+// back to NULL and make the tour auto-open again on next login.
+const updateMyTour = asyncHandler(async (req, res) => {
+  const { completed } = req.body;
+  if (typeof completed !== 'boolean') {
+    return res.status(400).json({ message: 'completed must be true or false' });
+  }
+  const { data, error } = await supabaseAdmin
+    .from('profiles')
+    .update({ tour_completed_at: completed ? new Date().toISOString() : null })
+    .eq('id', req.user.id)
+    .select('id, tour_completed_at')
+    .single();
+  if (error) return res.status(400).json({ message: error.message });
+  res.json(data);
+});
+
 // Scoped to the caller's own account only - nobody can set anyone else's.
 // Same 9 languages as the customer-facing NFC interface, so an owner or
 // staff member gets a language switcher they already recognize.
@@ -278,4 +305,4 @@ const changePassword = asyncHandler(async (req, res) => {
   res.json({ message: 'Password updated' });
 });
 
-module.exports = { register, login, refresh, me, updateMyTheme, updateMyLanguage, confirmDevice, changePassword };
+module.exports = { register, login, refresh, me, updateMyTheme, updateMyLanguage, updateMyTour, confirmDevice, changePassword };

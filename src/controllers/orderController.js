@@ -58,6 +58,43 @@ const listRequests = asyncHandler(async (req, res) => {
 
   if (error) return res.status(400).json({ message: error.message });
 
+  // Real fix for a confirmed dead end: hotel guest portal submissions
+  // (transportation, laundry, pool, reception messages, feedback, and
+  // any other non-housekeeping/maintenance request) are written to
+  // guest_service_requests, a table this page never queried. Staff had
+  // no way to ever see them - not a UI gap, a genuine black hole for
+  // real guest requests. Normalized into the same RequestRow shape the
+  // frontend already renders, so no frontend change was needed beyond
+  // this merge.
+  const { data: guestRequests, error: guestError } = await req.supabase
+    .from('guest_service_requests')
+    .select('id, room_id, request_type, note, status, created_at, hotel_rooms(room_number)')
+    .eq('business_id', req.params.businessId)
+    .order('created_at', { ascending: false })
+    .limit(50);
+  if (guestError) return res.status(400).json({ message: guestError.message });
+
+  const normalizedGuestRequests = (guestRequests || []).map((r) => ({
+    // Prefixed so dismissRequest can tell which table an id belongs to
+    // without a second lookup - orders ids are never prefixed, so this
+    // never collides with a real orders.id.
+    id: `gsr:${r.id}`,
+    table_label: r.hotel_rooms?.room_number ? `Room ${r.hotel_rooms.room_number}` : 'Front Desk',
+    request_type: 'custom',
+    custom_request_label: `${r.request_type.replace(/_/g, ' ')}${r.note ? ' - ' + r.note : ''}`,
+    target_section: null,
+    // guest_service_requests uses 'done'; orders uses 'completed' - the
+    // frontend's active/completed filter only knows 'completed', so this
+    // is normalized here rather than teaching the frontend a second
+    // status vocabulary for the same concept.
+    status: r.status === 'done' ? 'completed' : r.status,
+    created_at: r.created_at,
+  }));
+
+  const combined = [...(data || []), ...normalizedGuestRequests]
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+    .slice(0, 50);
+
   // Section filtering happens here, not in the query itself, since a
   // request with no target_section (NULL) must stay visible to
   // everyone with Requests access - that's the deliberate backward-
@@ -67,16 +104,31 @@ const listRequests = asyncHandler(async (req, res) => {
   // staff restriction correctly.
   const assignedSections = req.user.assigned_sections;
   const visible = Array.isArray(assignedSections)
-    ? (data || []).filter((r) => !r.target_section || assignedSections.includes(r.target_section))
-    : (data || []); // unrestricted staff (or owner) sees everything
+    ? combined.filter((r) => !r.target_section || assignedSections.includes(r.target_section))
+    : combined; // unrestricted staff (or owner) sees everything
 
   res.json(visible);
 });
 
 // @route PATCH /api/businesses/:businessId/requests/:requestId/dismiss
 // The only action a Call Waiter/Request Bill ping needs - no food-order
-// lifecycle applies to it.
+// lifecycle applies to it. Also handles guest_service_requests rows
+// (prefixed "gsr:" by listRequests above) so the same Dismiss button
+// works regardless of which table a request actually lives in.
 const dismissRequest = asyncHandler(async (req, res) => {
+  if (req.params.requestId.startsWith('gsr:')) {
+    const realId = req.params.requestId.slice(4);
+    const { data, error } = await req.supabase
+      .from('guest_service_requests')
+      .update({ status: 'done', resolved_at: new Date().toISOString() })
+      .eq('id', realId)
+      .eq('business_id', req.params.businessId)
+      .select()
+      .single();
+    if (error || !data) return res.status(404).json({ message: 'Request not found' });
+    return res.json({ ...data, id: req.params.requestId, status: 'completed' });
+  }
+
   const { data, error } = await req.supabase
     .from('orders')
     .update({ status: 'completed' })
