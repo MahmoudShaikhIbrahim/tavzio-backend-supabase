@@ -2,18 +2,32 @@ const { supabaseAdmin } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 
 // @route POST /api/public/leads
-// The "Get Started" form on the marketing homepage - deliberately the
-// only unauthenticated write endpoint outside the tap-gated public API,
-// since this is a marketing signup, not real customer/business data.
+// Serves two different homepage forms now (see migration 0087):
+// the full "Get Started" intake (business type, stand count) and the
+// lightweight "Contact us for pricing" form (email, phone, preferred
+// contact method only). source distinguishes which one a given lead
+// came from; only get_started requires businessType.
 const submitLead = asyncHandler(async (req, res) => {
-  const { email, phone, businessType, standsEstimate, note = '' } = req.body;
-  if (!email || !phone || !businessType) {
-    return res.status(400).json({ message: 'email, phone, and businessType are required' });
+  const { email, phone, businessType, standsEstimate, note = '', source = 'get_started', preferredContactMethod } = req.body;
+  if (!email || !phone) {
+    return res.status(400).json({ message: 'email and phone are required' });
+  }
+  if (source === 'get_started' && !businessType) {
+    return res.status(400).json({ message: 'businessType is required' });
+  }
+  if (source === 'pricing_inquiry' && !['email', 'phone'].includes(preferredContactMethod)) {
+    return res.status(400).json({ message: 'preferredContactMethod must be "email" or "phone"' });
   }
 
   const { data, error } = await supabaseAdmin
     .from('leads')
-    .insert({ email, phone, business_type: businessType, stands_estimate: Number(standsEstimate) || 0, note })
+    .insert({
+      email, phone, source,
+      business_type: businessType || null,
+      stands_estimate: Number(standsEstimate) || 0,
+      preferred_contact_method: preferredContactMethod || null,
+      note,
+    })
     .select()
     .single();
   if (error) return res.status(400).json({ message: error.message });
