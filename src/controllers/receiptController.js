@@ -306,7 +306,17 @@ const getReceiptBranding = asyncHandler(async (req, res) => {
 const updateReceiptBranding = asyncHandler(async (req, res) => {
   const { stampUrl, signatureUrl, legalName, issuerTrn } = req.body;
 
-  const { data: existing } = await req.supabase.from('receipt_branding').select('id').limit(1).maybeSingle();
+  // Real, confirmed bug fixed here: this used to select('id') only -
+  // meaning `existing` never actually carried the row's current
+  // stamp_url/signature_url/legal_name/issuer_trn values at all, so
+  // every fallback below (`existing?.stamp_url`) was silently always
+  // undefined regardless of what was really saved. Saving just the
+  // legal name, for example, would then write '' over a stamp/signature
+  // that was very much still supposed to be there - not a display bug,
+  // an actual silent data-loss bug on every single save. select('*')
+  // is what makes the merge-with-existing logic below actually work as
+  // the comments already claimed it did.
+  const { data: existing } = await req.supabase.from('receipt_branding').select('*').limit(1).maybeSingle();
 
   const payload = {
     stamp_url: stampUrl ?? existing?.stamp_url ?? '',

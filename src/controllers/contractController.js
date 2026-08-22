@@ -3,7 +3,7 @@ const PDFDocument = require('pdfkit');
 const { supabaseAdmin } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 const { logAction } = require('../utils/auditLog');
-const { sendContractSignLink } = require('../utils/notifications');
+const { sendContractSignLink, sendContractTerminated } = require('../utils/notifications');
 const { createSubscriptionCheckoutSession } = require('../utils/stripeAdapter');
 const { calculateVatExclusive } = require('../utils/vat');
 const { primaryClientUrl } = require('../utils/clientUrl');
@@ -687,9 +687,113 @@ const downloadPublicContractPdf = asyncHandler(async (req, res) => {
   return downloadContractPdf(req, res);
 });
 
+// @route POST /api/contracts/:contractId/terminate  (super_admin only)
+// Body: { basis: 'non_payment' | 'material_breach' | 'client_convenience' | 'mutual_agreement', reason?: string }
+// Real fix for a confirmed gap: nothing anywhere could terminate a
+// contract before this - only create/send/sign/onboard existed.
+// "Follows its rules and paths to the account" (confirmed requirement)
+// means this doesn't just flip a status column - it triggers the actual
+// consequences the signed contract text promises: Section 3/9 both tie
+// termination to the Client's access to the Service ending, so the
+// linked business is suspended in the same transaction, not left
+// running on a contract that no longer exists. basis is required and
+// constrained at the database level (migration 0086) to the same bases
+// the contract itself provides for, so a termination can never be
+// recorded on a footing the client never actually agreed to.
+const terminateContract = asyncHandler(async (req, res) => {
+  const { basis, reason = '' } = req.body;
+  if (!basis) return res.status(400).json({ message: 'basis is required' });
+
+  const { data: contract } = await supabaseAdmin.from('contracts').select('*').eq('id', req.params.contractId).single();
+  if (!contract) return res.status(404).json({ message: 'Contract not found' });
+  if (!['signed', 'paid', 'active'].includes(contract.status)) {
+    return res.status(400).json({ message: `Only a signed/paid/active contract can be terminated - this one is "${contract.status}".` });
+  }
+
+  const { data: updated, error } = await supabaseAdmin
+    .from('contracts')
+    .update({
+      status: 'terminated',
+      terminated_at: new Date().toISOString(),
+      terminated_by: req.user.id,
+      termination_reason: reason,
+      termination_basis: basis,
+    })
+    .eq('id', contract.id)
+    .select()
+    .single();
+  if (error) return res.status(400).json({ message: error.message });
+
+  // The actual, real consequence the contract promises - "access to the
+  // Service" ending. Only applies if this contract has actually been
+  // onboarded into a real business account yet; a signed-but-not-yet-
+  // onboarded contract has no business row to suspend.
+  let business = null;
+  if (contract.business_id) {
+    const { data: b } = await supabaseAdmin
+      .from('businesses')
+      .update({ status: 'suspended' })
+      .eq('id', contract.business_id)
+      .select('id, name, owner')
+      .single();
+    business = b;
+
+    if (business) {
+      const { data: ownerAuth } = await supabaseAdmin.auth.admin.getUserById(business.owner);
+      if (ownerAuth?.user?.email) {
+        await sendContractTerminated({ email: ownerAuth.user.email, businessName: business.name, reason, basis }).catch(() => {});
+      }
+    }
+  }
+
+  await logAction({
+    businessId: contract.business_id,
+    actor: req.user,
+    action: 'contract_terminated',
+    targetId: contract.id,
+    details: { contractNumber: contract.contract_number, basis, reason, businessSuspended: !!business },
+  });
+
+  res.json({ ...updated, businessSuspended: !!business });
+});
+
+// @route DELETE /api/contracts/:contractId  (super_admin only)
+// Deliberately restricted to draft/sent contracts only - a contract the
+// client has actually signed is a real, legally binding record; hard-
+// deleting it would destroy the evidence that an agreement (and its
+// terms - fees, notice periods, data handling) ever existed. Anything
+// signed, paid, active, or already terminated must go through
+// terminateContract above instead, which keeps the row (and its
+// history) and only changes its status. This is the deliberate line:
+// delete is for "this was never actually agreed to," terminate is for
+// "this was agreed to and is now ending."
+const deleteContract = asyncHandler(async (req, res) => {
+  const { data: contract } = await supabaseAdmin.from('contracts').select('id, status, contract_number, business_id').eq('id', req.params.contractId).single();
+  if (!contract) return res.status(404).json({ message: 'Contract not found' });
+  if (!['draft', 'sent'].includes(contract.status)) {
+    return res.status(400).json({
+      message: `A ${contract.status} contract has already been agreed to and can't be deleted - use "Terminate" instead, which preserves the record.`,
+    });
+  }
+
+  const { error } = await supabaseAdmin.from('contracts').delete().eq('id', contract.id);
+  if (error) return res.status(400).json({ message: error.message });
+
+  await logAction({
+    businessId: contract.business_id,
+    actor: req.user,
+    action: 'contract_deleted',
+    targetId: contract.id,
+    details: { contractNumber: contract.contract_number, priorStatus: contract.status },
+  });
+
+  res.json({ message: 'Contract deleted' });
+});
+
 module.exports = {
   createContract, sendContract, listContracts, previewContract, signContract, downloadContractPdf, downloadPublicContractPdf,
   getPublicContractByToken, signPublicContract,
   createStandaloneContract, listAllContracts, onboardContract, previewStandaloneContract,
+  terminateContract, deleteContract,
   buildContractText, periodsPerYear,
 };

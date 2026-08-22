@@ -1,6 +1,7 @@
 const { supabaseAdmin, supabasePublic } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 const { verifyTurnstileToken } = require('../utils/turnstile');
+const { logAction } = require('../utils/auditLog');
 const crypto = require('crypto');
 
 // @route POST /api/auth/register
@@ -305,4 +306,46 @@ const changePassword = asyncHandler(async (req, res) => {
   res.json({ message: 'Password updated' });
 });
 
-module.exports = { register, login, refresh, me, updateMyTheme, updateMyLanguage, updateMyTour, confirmDevice, changePassword };
+// @route PATCH /api/auth/email
+// Body: { currentPassword, newEmail }
+// Same security discipline as changePassword above: verifying the
+// current password first (a real sign-in attempt) stops someone on an
+// already-unlocked device from silently taking over the account's
+// email - and by extension, every future password reset, which goes to
+// whatever email is on file. Uses the admin client to set the new
+// email directly and immediately, matching how password changes here
+// already work (no separate confirmation-link dance), rather than
+// relying on Supabase Auth's built-in dual-email-confirmation flow,
+// which would need its own email delivery setup distinct from the
+// Gmail-based sender this app already uses for everything else.
+const changeMyEmail = asyncHandler(async (req, res) => {
+  const { currentPassword, newEmail } = req.body;
+  if (!currentPassword || !newEmail) {
+    return res.status(400).json({ message: 'currentPassword and newEmail are required' });
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+    return res.status(400).json({ message: 'That doesn\'t look like a valid email address' });
+  }
+
+  const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(req.user.id);
+  const currentEmail = authUser?.user?.email;
+  if (!currentEmail) return res.status(400).json({ message: 'Could not verify your account' });
+
+  const { error: verifyError } = await supabasePublic.auth.signInWithPassword({ email: currentEmail, password: currentPassword });
+  if (verifyError) return res.status(401).json({ message: 'Current password is incorrect' });
+
+  const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(req.user.id, { email: newEmail, email_confirm: true });
+  if (updateError) return res.status(400).json({ message: updateError.message });
+
+  await logAction({
+    businessId: req.user.business_id,
+    actor: req.user,
+    action: 'email_changed',
+    targetId: req.user.id,
+    details: { from: currentEmail, to: newEmail, changedBySelf: true },
+  });
+
+  res.json({ message: 'Email updated', email: newEmail });
+});
+
+module.exports = { register, login, refresh, me, updateMyTheme, updateMyLanguage, updateMyTour, changeMyEmail, confirmDevice, changePassword };

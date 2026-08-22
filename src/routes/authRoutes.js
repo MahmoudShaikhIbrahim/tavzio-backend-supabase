@@ -1,6 +1,6 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
-const { register, login, refresh, me, updateMyTheme, updateMyLanguage, updateMyTour, confirmDevice, changePassword } = require('../controllers/authController');
+const { register, login, refresh, me, updateMyTheme, updateMyLanguage, updateMyTour, changeMyEmail, confirmDevice, changePassword } = require('../controllers/authController');
 const { listMyLinkedAccounts, createLinkedAccount, deleteLinkedAccount, switchAccount } = require('../controllers/linkedAccountsController');
 const { protect, authorize } = require('../middleware/auth');
 
@@ -38,6 +38,7 @@ router.patch('/theme', protect, updateMyTheme);
 router.patch('/language', protect, updateMyLanguage);
 router.patch('/tour', protect, updateMyTour);
 router.patch('/change-password', protect, loginLimiter, changePassword);
+router.patch('/email', protect, loginLimiter, changeMyEmail);
 router.get('/confirm-device/:pendingId', confirmDevice);
 
 router.get('/linked-accounts', protect, listMyLinkedAccounts);

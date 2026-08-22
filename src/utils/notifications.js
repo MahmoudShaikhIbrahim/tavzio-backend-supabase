@@ -141,7 +141,29 @@ function sendAccountSuspended({ email, businessName }) {
   });
 }
 
+// Distinct from sendAccountSuspended above - that one is specifically
+// about repeated payment failures. A contract termination can happen
+// for several different contractual reasons (Section 9: material
+// breach, 90-day convenience notice, mutual agreement; Section 3:
+// non-payment past 30 days) and the notice sent to the client should
+// say which one actually applies, not a generic "suspended" message
+// that doesn't match what's actually happening to their account.
+const TERMINATION_BASIS_LABEL = {
+  non_payment: 'non-payment of fees due under the Agreement',
+  material_breach: 'an uncured material breach of the Agreement',
+  client_convenience: 'termination for convenience under Section 9 of the Agreement',
+  mutual_agreement: 'mutual agreement between the parties',
+};
+function sendContractTerminated({ email, businessName, reason, basis }) {
+  const basisLabel = TERMINATION_BASIS_LABEL[basis] || basis;
+  return sendMail({
+    to: email,
+    subject: `Your Tavzio service agreement has been terminated`,
+    text: `Hi,\n\nYour Tavzio service agreement for ${businessName} has been terminated, effective immediately, on the basis of ${basisLabel}.${reason ? `\n\nReason provided: ${reason}` : ''}\n\nPer Section 4 of your Agreement, any NFC stands supplied under this Agreement must be returned to Tavzio within fourteen (14) days in good working condition. Please contact us to arrange collection.\n\nYour account access has been suspended as of this notice. If you believe this is in error, please contact us directly.\n\n- Tavzio`,
+  });
+}
+
 module.exports = {
   notifyCardUsed, sendDeviceConfirmation, sendMail,
-  sendContractSignLink, sendContractSignedReceipt, sendPaymentFailedWarning, sendAccountSuspended,
+  sendContractSignLink, sendContractSignedReceipt, sendPaymentFailedWarning, sendAccountSuspended, sendContractTerminated,
 };
