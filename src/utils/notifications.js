@@ -10,6 +10,7 @@
 // the gmail.send scope. From then on, this code exchanges that refresh
 // token for a short-lived access token on demand - never needs a human
 // to sign in again unless the refresh token itself is revoked.
+const { supabaseAdmin } = require('../config/supabaseClient');
 const GMAIL_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GMAIL_SEND_URL = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send';
 
@@ -94,16 +95,18 @@ async function sendMail({ to, subject, text }) {
 }
 
 function notifyCardUsed({ email, deviceLabel, businessName }) {
-  return sendMail({
+  return sendViaResend({
     to: email,
+    from: RESEND_SECURITY_FROM,
     subject: `Your Tavzio admin card was just used`,
     text: `Your admin card for ${businessName} was just tapped and used to log in (${deviceLabel || 'unknown device'}). If this wasn't you, disable the card immediately from your dashboard and change your account password.`,
   });
 }
 
 function sendDeviceConfirmation({ email, confirmUrl, businessName }) {
-  return sendMail({
+  return sendViaResend({
     to: email,
+    from: RESEND_SECURITY_FROM,
     subject: `Confirm this device for your Tavzio dashboard`,
     text: `Someone tapped your admin card on a device we haven't seen before for ${businessName}. If this was you, open this link on that SAME device to finish logging in: ${confirmUrl}\n\nThis link expires in 10 minutes. If this wasn't you, ignore this email and consider disabling the card.`,
   });
@@ -118,24 +121,27 @@ function sendContractSignLink({ email, businessName, signUrl }) {
 }
 
 function sendContractSignedReceipt({ email, businessName, receiptNumber, amountAed, pdfUrl }) {
-  return sendMail({
+  return sendViaResend({
     to: email,
+    from: RESEND_BILLING_FROM,
     subject: `Receipt ${receiptNumber} - AED ${amountAed.toFixed(2)}`,
     text: `Hi,\n\nYour payment of AED ${amountAed.toFixed(2)} for ${businessName} was received automatically. Receipt ${receiptNumber} is attached to your account - view it here:\n\n${pdfUrl}\n\n- Tavzio`,
   });
 }
 
 function sendPaymentFailedWarning({ email, businessName, attempt }) {
-  return sendMail({
+  return sendViaResend({
     to: email,
+    from: RESEND_BILLING_FROM,
     subject: `Payment issue with your Tavzio subscription`,
     text: `Hi,\n\nA scheduled payment for ${businessName}'s Tavzio subscription didn't go through (attempt ${attempt}). Please check your card details are current. If this isn't resolved, your account may be suspended.\n\n- Tavzio`,
   });
 }
 
 function sendAccountSuspended({ email, businessName }) {
-  return sendMail({
+  return sendViaResend({
     to: email,
+    from: RESEND_BILLING_FROM,
     subject: `Your Tavzio account has been suspended`,
     text: `Hi,\n\n${businessName}'s Tavzio account has been suspended due to repeated failed payments. Please contact us to update your payment details and reactivate your account.\n\n- Tavzio`,
   });
@@ -156,14 +162,130 @@ const TERMINATION_BASIS_LABEL = {
 };
 function sendContractTerminated({ email, businessName, reason, basis }) {
   const basisLabel = TERMINATION_BASIS_LABEL[basis] || basis;
-  return sendMail({
+  return sendViaResend({
     to: email,
+    from: RESEND_BILLING_FROM,
     subject: `Your Tavzio service agreement has been terminated`,
     text: `Hi,\n\nYour Tavzio service agreement for ${businessName} has been terminated, effective immediately, on the basis of ${basisLabel}.${reason ? `\n\nReason provided: ${reason}` : ''}\n\nPer Section 4 of your Agreement, any NFC stands supplied under this Agreement must be returned to Tavzio within fourteen (14) days in good working condition. Please contact us to arrange collection.\n\nYour account access has been suspended as of this notice. If you believe this is in error, please contact us directly.\n\n- Tavzio`,
   });
 }
 
+// Real fix, built specifically to avoid repeating the last confirmed
+// bug: Supabase's own inviteUserByEmail() (a) can't be called again for
+// an email that's already registered - it just errors - and (b) always
+// sends via Supabase's own built-in mailer, which both has a strict
+// rate limit entirely separate from anything this app controls AND
+// shows up to the recipient as coming from Supabase, not Tavzio.
+// generateLink() (type: 'invite' for a brand-new user, 'recovery' for
+// an existing one) sidesteps both problems at once: it produces a real
+// action_link WITHOUT Supabase ever sending anything itself - sending
+// is entirely this app's job from here, via Resend below, so the
+// email is genuinely Tavzio-branded and never touches Supabase's
+// mailer or its rate limit at all.
+const RESEND_API_URL = 'https://api.resend.com/emails';
+// Two distinct sender identities, both on the same Resend account/
+// domain - confirmed: invites read as "Tavzio invited you," billing
+// correspondence (receipts, payment failures, suspension, termination)
+// reads as "the billing system," a real, deliberate separation, not
+// two names for the same thing.
+const RESEND_INVITE_FROM = process.env.RESEND_FROM_ADDRESS || 'Tavzio <invites@tavzio.ae>';
+const RESEND_BILLING_FROM = process.env.RESEND_BILLING_FROM_ADDRESS || 'Tavzio Billing <billing@tavzio.ae>';
+// Card-tap and new-device notices are both account-security events, not
+// billing or invites - one identity covers both, distinct from the
+// other two for the same reason billing and invites are distinct from
+// each other: a person reading "security@" instantly knows the
+// category before opening it.
+const RESEND_SECURITY_FROM = process.env.RESEND_SECURITY_FROM_ADDRESS || 'Tavzio Security <security@tavzio.ae>';
+// Named for the FEATURE (a business sending a campaign to its own
+// customers through Tavzio), not "marketing@" - that name would read
+// as Tavzio's own marketing to prospects, which this isn't.
+const RESEND_CAMPAIGNS_FROM = process.env.RESEND_CAMPAIGNS_FROM_ADDRESS || 'Tavzio Campaigns <campaigns@tavzio.ae>';
+
+async function sendViaResend({ to, subject, text, from = RESEND_INVITE_FROM }) {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.error('RESEND_API_KEY is not set - email was not sent.');
+    return;
+  }
+  const res = await fetch(RESEND_API_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ from, to, subject, text }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Resend send failed (${res.status}): ${body}`);
+  }
+}
+
+function inviteEmailCopy({ name, businessLabel, actionLink }) {
+  return {
+    subject: `Your Tavzio invite - ${businessLabel}`,
+    text: `Hi ${name},\n\nHere's your invite link to activate your Tavzio account for ${businessLabel}. Click below to set your password:\n\n${actionLink}\n\nThis link is single-use and expires after a while - if it's stopped working by the time you click it, just ask whoever invited you to resend it.\n\n- Tavzio`,
+  };
+}
+
+// The FIRST invite for a brand-new account - generateLink(type:
+// 'invite') both creates the unconfirmed user AND returns the link,
+// with no email sent by Supabase in the process. Throws with the same
+// "already been registered"-shaped error Supabase's own
+// inviteUserByEmail used to throw, so the existing fallback-to-resend
+// logic in staffController.js/organizationController.js needed no
+// change in shape, only in what each branch actually calls.
+async function sendNewInviteEmail({ email, name, businessLabel, redirectTo, userMetadata }) {
+  const { data, error } = await supabaseAdmin.auth.admin.generateLink({
+    type: 'invite',
+    email,
+    options: { redirectTo, data: userMetadata },
+  });
+  if (error) throw error;
+
+  await sendViaResend({ to: email, ...inviteEmailCopy({ name, businessLabel, actionLink: data.properties.action_link }) });
+  return data.user;
+}
+
+// The RESEND path, for an email that already has an account (never
+// finished onboarding, or is being re-invited after already having
+// one) - generateLink(type: 'recovery') works for an existing user
+// regardless of whether they ever set a password, unlike 'invite'
+// which only works for brand-new emails.
+async function resendInviteEmail({ email, name, businessLabel, redirectTo }) {
+  const { data, error } = await supabaseAdmin.auth.admin.generateLink({
+    type: 'recovery',
+    email,
+    options: { redirectTo },
+  });
+  if (error) throw error;
+
+  return sendViaResend({ to: email, ...inviteEmailCopy({ name, businessLabel, actionLink: data.properties.action_link }) });
+}
+
+// Real fix, found in the same audit as the two above: campaign sends
+// used to go through sendMail (Gmail), which is fire-and-forget by
+// design and never throws - so marketingController.js's send loop had
+// no real way to tell a genuine delivery failure from a success, and
+// its own failedCount variable was declared but never actually
+// incremented anywhere. sendViaResend DOES throw on a real failure -
+// this wraps that so a business's own campaign to its customers goes
+// out under campaigns@tavzio.ae (not Tavzio's own founder@ inbox),
+// while still returning a clean boolean the caller's loop can check
+// per-recipient, rather than letting one bad address throw and abort
+// the rest of the campaign.
+async function sendCampaignEmail({ to, subject, text }) {
+  try {
+    await sendViaResend({ to, subject, text, from: RESEND_CAMPAIGNS_FROM });
+    return true;
+  } catch (err) {
+    console.error(`Campaign send to ${to} failed:`, err.message);
+    return false;
+  }
+}
+
 module.exports = {
   notifyCardUsed, sendDeviceConfirmation, sendMail,
   sendContractSignLink, sendContractSignedReceipt, sendPaymentFailedWarning, sendAccountSuspended, sendContractTerminated,
+  sendNewInviteEmail, resendInviteEmail, sendCampaignEmail,
 };

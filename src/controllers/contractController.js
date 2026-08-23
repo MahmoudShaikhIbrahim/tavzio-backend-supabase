@@ -3,7 +3,7 @@ const PDFDocument = require('pdfkit');
 const { supabaseAdmin } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 const { logAction } = require('../utils/auditLog');
-const { sendContractSignLink, sendContractTerminated } = require('../utils/notifications');
+const { sendContractSignLink, sendContractTerminated, sendNewInviteEmail, resendInviteEmail } = require('../utils/notifications');
 const { createSubscriptionCheckoutSession } = require('../utils/stripeAdapter');
 const { calculateVatExclusive } = require('../utils/vat');
 const { primaryClientUrl } = require('../utils/clientUrl');
@@ -231,10 +231,39 @@ const onboardContract = asyncHandler(async (req, res) => {
     slug = `${baseSlug}-${suffix}`;
   }
 
-  const { data: created, error: createError } = await supabaseAdmin.auth.admin.inviteUserByEmail(contract.client_email, {
-    data: { name: contract.client_name, role: 'business_owner' },
-  });
-  if (createError) return res.status(400).json({ message: createError.message });
+  // Real fix, found during an audit of every email-triggering event in
+  // this codebase: this was still using Supabase's own
+  // inviteUserByEmail() - the exact same bug already fixed everywhere
+  // else (no redirectTo, so it fell back to Supabase's own dashboard
+  // Site URL setting, and always sent via Supabase's own rate-limited
+  // mailer, showing up as "from Supabase" rather than Tavzio) - just
+  // never caught here until this specific audit, even though this is
+  // arguably the single most important email in the whole system: a
+  // brand-new paying client's first login. Same sendNewInviteEmail /
+  // resendInviteEmail pair, same invites@tavzio.ae identity, same
+  // already-registered fallback as staff/org invites.
+  const redirectTo = `${process.env.CLIENT_URL}/admin/login`;
+  let ownerUserId;
+  try {
+    const created = await sendNewInviteEmail({
+      email: contract.client_email,
+      name: contract.client_name,
+      businessLabel: contract.client_business_name,
+      redirectTo,
+      userMetadata: { name: contract.client_name, role: 'business_owner' },
+    });
+    ownerUserId = created.id;
+  } catch (createError) {
+    if (createError.message && createError.message.toLowerCase().includes('already been registered')) {
+      const { data: existing } = await supabaseAdmin.auth.admin.listUsers();
+      const existingUser = existing?.users?.find((u) => u.email?.toLowerCase() === contract.client_email.toLowerCase());
+      if (!existingUser) return res.status(400).json({ message: createError.message });
+      ownerUserId = existingUser.id;
+      await resendInviteEmail({ email: contract.client_email, name: contract.client_name, businessLabel: contract.client_business_name, redirectTo });
+    } else {
+      return res.status(400).json({ message: createError.message });
+    }
+  }
 
   const { data: business, error: businessError } = await supabaseAdmin
     .from('businesses')
@@ -242,14 +271,14 @@ const onboardContract = asyncHandler(async (req, res) => {
       name: contract.client_business_name,
       slug,
       category: contract.client_category || 'other',
-      owner: created.user.id,
+      owner: ownerUserId,
       status: 'active',
     })
     .select()
     .single();
   if (businessError) return res.status(400).json({ message: businessError.message });
 
-  await supabaseAdmin.from('profiles').update({ business_id: business.id, must_change_password: true }).eq('id', created.user.id);
+  await supabaseAdmin.from('profiles').update({ business_id: business.id, must_change_password: true }).eq('id', ownerUserId);
 
   const { data: updatedContract, error: contractError } = await supabaseAdmin
     .from('contracts')

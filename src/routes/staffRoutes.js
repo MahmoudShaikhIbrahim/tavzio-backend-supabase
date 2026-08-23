@@ -1,5 +1,5 @@
 const express = require('express');
-const { inviteStaff, listStaff, setStaffActive, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, listRolePermissions, resetPassword } = require('../controllers/staffController');
+const { inviteStaff, resendStaffInvite, listStaff, setStaffActive, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, listRolePermissions, resetPassword } = require('../controllers/staffController');
 const { issueAdminCard } = require('../controllers/cardController');
 const { protect, authorize, enforceTenant } = require('../middleware/auth');
 
@@ -37,6 +37,7 @@ router.patch('/:userId/nav-layout', setMyNavLayout);
 // (including the owner's own, if truly locked out and unable to reach
 // the normal Change Password flow in Settings).
 router.post('/:userId/reset-password', authorize('business_owner', 'super_admin'), resetPassword);
+router.post('/:userId/resend-invite', authorize('business_owner', 'super_admin'), resendStaffInvite);
 router.get('/role-permissions', listRolePermissions);
 // Only you issue/reissue admin cards — matches how the physical NFC chips
 // actually get programmed (in person, by the platform operator). Either the

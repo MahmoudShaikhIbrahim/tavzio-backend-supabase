@@ -2,11 +2,12 @@ const { supabaseAdmin } = require('../config/supabaseClient');
 const asyncHandler = require('../utils/asyncHandler');
 const { revokeSessionsFor } = require('../utils/revokeSessions');
 const { logAction } = require('../utils/auditLog');
+const { sendNewInviteEmail, resendInviteEmail } = require('../utils/notifications');
 const crypto = require('crypto');
 
 // @route POST /api/businesses/:businessId/staff
 // Creates a staff account (Supabase Auth user + profile row via the
-// handle_new_user trigger), linked to this business, via Supabase's real
+// handle_new_user trigger), linked to this business, via a real
 // invite-by-email flow. This sends the staff member an actual email
 // letting THEM set their own password - we never generate or see it.
 // Whether that password ever gets used depends entirely on this
@@ -19,18 +20,60 @@ const inviteStaff = asyncHandler(async (req, res) => {
   const { name, email, jobRole } = req.body;
   if (!name || !email) return res.status(400).json({ message: 'name and email are required' });
 
-  const { data: created, error: createError } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
-    data: { name, role: 'staff' },
-  });
-  if (createError) return res.status(400).json({ message: createError.message });
+  const { data: business } = await supabaseAdmin.from('businesses').select('name').eq('id', req.params.businessId).maybeSingle();
+  const redirectTo = `${process.env.CLIENT_URL}/admin/login`;
+
+  // Real fix, confirmed on two separate counts: this used to call
+  // Supabase's own inviteUserByEmail(), which (a) without redirectTo
+  // explicitly set, fell back to whatever "Site URL" is configured in
+  // Supabase's OWN dashboard settings rather than this app's CLIENT_URL
+  // - which was still the localhost placeholder, so the link was dead -
+  // and (b) always sent via Supabase's own mailer, so the email showed
+  // up looking like it came from Supabase, not Tavzio, and shared
+  // Supabase's own strict send-rate limit with every other project on
+  // the account. sendNewInviteEmail (see notifications.js) generates
+  // the link without Supabase ever sending anything, then sends the
+  // actual email via Resend on Tavzio's own verified domain - both
+  // problems fixed by the same change.
+  let created;
+  try {
+    created = await sendNewInviteEmail({
+      email, name, businessLabel: business?.name || 'Tavzio', redirectTo,
+      userMetadata: { name, role: 'staff' },
+    });
+  } catch (createError) {
+    // Real fix: clicking "Add staff" a second time for someone who
+    // never checked their first email used to just fail outright -
+    // "already registered" - with no way to actually get them a
+    // working link short of asking a super_admin to intervene.
+    // Detecting this specific error and falling back to a real resend
+    // makes the same "Add staff" button double as "resend," which is
+    // what an owner clicking it a second time actually means in
+    // practice.
+    if (createError.message && createError.message.toLowerCase().includes('already been registered')) {
+      const { data: existing } = await supabaseAdmin.auth.admin.listUsers();
+      const existingUser = existing?.users?.find((u) => u.email?.toLowerCase() === email.toLowerCase());
+      if (!existingUser) return res.status(400).json({ message: createError.message });
+
+      await supabaseAdmin
+        .from('profiles')
+        .update({ business_id: req.params.businessId, job_role: jobRole || null })
+        .eq('id', existingUser.id);
+
+      await resendInviteEmail({ email, name, businessLabel: business?.name || 'Tavzio', redirectTo });
+
+      return res.status(200).json({ id: existingUser.id, name, email, role: 'staff', jobRole: jobRole || null, resent: true });
+    }
+    return res.status(400).json({ message: createError.message });
+  }
 
   const { error: profileError } = await supabaseAdmin
     .from('profiles')
     .update({ business_id: req.params.businessId, job_role: jobRole || null })
-    .eq('id', created.user.id);
+    .eq('id', created.id);
   if (profileError) return res.status(400).json({ message: profileError.message });
 
-  res.status(201).json({ id: created.user.id, name, email, role: 'staff', jobRole: jobRole || null });
+  res.status(201).json({ id: created.id, name, email, role: 'staff', jobRole: jobRole || null });
 });
 
 // @route GET /api/businesses/:businessId/staff
@@ -249,4 +292,33 @@ const setMyNavLayout = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
-module.exports = { inviteStaff, listStaff, setStaffActive, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, listRolePermissions, resetPassword };
+// @route POST /api/businesses/:businessId/staff/:userId/resend-invite
+// The other entry point for the same resend logic in inviteStaff above -
+// this one for a staff member who's already listed (so their email
+// isn't sitting in a form anymore, it needs looking up from auth.users)
+// rather than someone re-typing the whole add-staff form to trigger it.
+const resendStaffInvite = asyncHandler(async (req, res) => {
+  const { data: profile } = await req.supabase
+    .from('profiles')
+    .select('id, name')
+    .eq('id', req.params.userId)
+    .eq('business_id', req.params.businessId)
+    .maybeSingle();
+  if (!profile) return res.status(404).json({ message: 'Staff member not found' });
+
+  const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.getUserById(profile.id);
+  if (authError || !authUser?.user?.email) return res.status(404).json({ message: 'Could not find this account\'s email' });
+
+  const { data: business } = await supabaseAdmin.from('businesses').select('name').eq('id', req.params.businessId).maybeSingle();
+
+  await resendInviteEmail({
+    email: authUser.user.email,
+    name: profile.name,
+    businessLabel: business?.name || 'Tavzio',
+    redirectTo: `${process.env.CLIENT_URL}/admin/login`,
+  });
+
+  res.json({ message: 'Invite resent' });
+});
+
+module.exports = { inviteStaff, resendStaffInvite, listStaff, setStaffActive, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, listRolePermissions, resetPassword };

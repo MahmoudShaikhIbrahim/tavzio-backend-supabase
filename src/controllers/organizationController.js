@@ -1,6 +1,7 @@
 const asyncHandler = require('../utils/asyncHandler');
 const { supabaseAdmin } = require('../config/supabaseClient');
 const { logAction } = require('../utils/auditLog');
+const { resendInviteEmail, sendNewInviteEmail } = require('../utils/notifications');
 
 // ============================================================
 // Super admin: organization + membership management
@@ -50,18 +51,50 @@ const inviteOrgOwner = asyncHandler(async (req, res) => {
   const { name, email } = req.body;
   if (!name || !email) return res.status(400).json({ message: 'name and email are required' });
 
-  const { data: created, error: createError } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
-    data: { name, role: 'org_owner' },
-  });
-  if (createError) return res.status(400).json({ message: createError.message });
+  const { data: org } = await supabaseAdmin.from('organizations').select('name').eq('id', req.params.organizationId).maybeSingle();
+  const redirectTo = `${process.env.CLIENT_URL}/admin/login`;
+
+  // Same real fix as staffController.js's inviteStaff, same reasoning:
+  // generateLink-based sendNewInviteEmail (see notifications.js) never
+  // lets Supabase send anything itself, and Resend sends the actual
+  // email on Tavzio's own verified domain instead.
+  let created;
+  try {
+    created = await sendNewInviteEmail({
+      email, name, businessLabel: org?.name || 'Tavzio', redirectTo,
+      userMetadata: { name, role: 'org_owner' },
+    });
+  } catch (createError) {
+    // Same fallback as inviteStaff, same reasoning: clicking "Invite" a
+    // second time for someone who never checked their first email used
+    // to just fail with "already registered" and no way forward. Since
+    // this org invite form has no separate list of pending invites to
+    // attach a dedicated "Resend" button to, making the invite button
+    // itself idempotent this way is the real fix, not a UI addition.
+    if (createError.message && createError.message.toLowerCase().includes('already been registered')) {
+      const { data: existing } = await supabaseAdmin.auth.admin.listUsers();
+      const existingUser = existing?.users?.find((u) => u.email?.toLowerCase() === email.toLowerCase());
+      if (!existingUser) return res.status(400).json({ message: createError.message });
+
+      await supabaseAdmin
+        .from('profiles')
+        .update({ organization_id: req.params.organizationId, role: 'org_owner', must_change_password: true })
+        .eq('id', existingUser.id);
+
+      await resendInviteEmail({ email, name, businessLabel: org?.name || 'Tavzio', redirectTo });
+
+      return res.status(200).json({ id: existingUser.id, name, email, role: 'org_owner', organizationId: req.params.organizationId, resent: true });
+    }
+    return res.status(400).json({ message: createError.message });
+  }
 
   const { error: profileError } = await supabaseAdmin
     .from('profiles')
     .update({ organization_id: req.params.organizationId, role: 'org_owner', must_change_password: true })
-    .eq('id', created.user.id);
+    .eq('id', created.id);
   if (profileError) return res.status(400).json({ message: profileError.message });
 
-  res.status(201).json({ id: created.user.id, name, email, role: 'org_owner', organizationId: req.params.organizationId });
+  res.status(201).json({ id: created.id, name, email, role: 'org_owner', organizationId: req.params.organizationId });
 });
 
 // ============================================================

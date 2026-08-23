@@ -1,5 +1,5 @@
 const asyncHandler = require('../utils/asyncHandler');
-const { sendMail } = require('../utils/notifications');
+const { sendCampaignEmail } = require('../utils/notifications');
 
 async function requireMarketingFeature(req, res) {
   const { data: business } = await req.supabase.from('businesses').select('features, category').eq('id', req.params.businessId).single();
@@ -143,24 +143,17 @@ const sendCampaign = asyncHandler(async (req, res) => {
   let sentCount = 0;
   let failedCount = 0;
 
-  // Sent sequentially, not in parallel - Gmail API sends are already
-  // being used for transactional mail elsewhere; a burst of 500
-  // simultaneous campaign sends could contend with those and risk
-  // hitting Gmail's per-second send-rate limit. Slower, but doesn't
-  // risk transactional email (receipts, password resets) getting
-  // delayed behind a marketing blast.
-  // Note: sendMail() is fire-and-forget by design (see its header comment
-  // in utils/notifications.js) - it logs failures server-side but never
-  // throws, so this loop can't distinguish a real delivery failure from
-  // success at the HTTP layer. That's the same behavior every other email
-  // in this codebase already has (receipts, password resets, etc.) - 'sent'
-  // here means 'handed to Gmail's API without error', not 'confirmed
-  // delivered'. Genuine per-recipient delivery/bounce tracking would need
-  // Gmail push notifications or a different provider with webhooks.
+  // Sent sequentially, not in parallel - avoids bursting past whatever
+  // per-second send rate Resend enforces on this account, same
+  // reasoning as before, just no longer tied to Gmail specifically.
+  // Unlike the old Gmail-based sendMail (fire-and-forget, never threw),
+  // sendCampaignEmail returns a real boolean per recipient - so
+  // failedCount below is now genuinely meaningful, not a dead
+  // always-zero variable.
   for (const r of recipients || []) {
-    await sendMail({ to: r.contact_value, subject: campaign.subject || campaign.name, text: campaign.body });
-    await req.supabase.from('marketing_campaign_recipients').update({ status: 'sent', sent_at: now }).eq('id', r.id);
-    sentCount += 1;
+    const delivered = await sendCampaignEmail({ to: r.contact_value, subject: campaign.subject || campaign.name, text: campaign.body });
+    await req.supabase.from('marketing_campaign_recipients').update({ status: delivered ? 'sent' : 'failed', sent_at: now }).eq('id', r.id);
+    if (delivered) sentCount += 1; else failedCount += 1;
   }
 
   const { data, error } = await req.supabase.from('marketing_campaigns').update({ status: 'sent', sent_at: now }).eq('id', req.params.campaignId).select().single();
