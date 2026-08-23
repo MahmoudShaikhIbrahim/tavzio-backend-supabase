@@ -17,8 +17,11 @@ const crypto = require('crypto');
 // already has a real, working password ready to go - no separate step
 // needed later.
 const inviteStaff = asyncHandler(async (req, res) => {
-  const { name, email, jobRole } = req.body;
+  const { name, email, jobRole, sections } = req.body;
   if (!name || !email) return res.status(400).json({ message: 'name and email are required' });
+  if (sections !== undefined && sections !== null && !Array.isArray(sections)) {
+    return res.status(400).json({ message: 'sections must be an array or null' });
+  }
 
   const { data: business } = await supabaseAdmin.from('businesses').select('name').eq('id', req.params.businessId).maybeSingle();
   const redirectTo = `${process.env.CLIENT_URL}/admin/login`;
@@ -57,7 +60,7 @@ const inviteStaff = asyncHandler(async (req, res) => {
 
       await supabaseAdmin
         .from('profiles')
-        .update({ business_id: req.params.businessId, job_role: jobRole || null })
+        .update({ business_id: req.params.businessId, job_role: jobRole || null, assigned_sections: sections ?? null })
         .eq('id', existingUser.id);
 
       await resendInviteEmail({ email, name, businessLabel: business?.name || 'Tavzio', redirectTo });
@@ -69,11 +72,11 @@ const inviteStaff = asyncHandler(async (req, res) => {
 
   const { error: profileError } = await supabaseAdmin
     .from('profiles')
-    .update({ business_id: req.params.businessId, job_role: jobRole || null })
+    .update({ business_id: req.params.businessId, job_role: jobRole || null, assigned_sections: sections ?? null })
     .eq('id', created.id);
   if (profileError) return res.status(400).json({ message: profileError.message });
 
-  res.status(201).json({ id: created.id, name, email, role: 'staff', jobRole: jobRole || null });
+  res.status(201).json({ id: created.id, name, email, role: 'staff', jobRole: jobRole || null, assigned_sections: sections ?? null });
 });
 
 // @route GET /api/businesses/:businessId/staff
@@ -292,6 +295,42 @@ const setMyNavLayout = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
+// @route DELETE /api/businesses/:businessId/staff/:userId
+// Real, permanent removal - distinct from setStaffActive's deactivate
+// toggle (which keeps the account and its history, just blocks login).
+// This deletes the auth user outright, which cascades to the profile
+// row (profiles.id references auth.users(id) on delete cascade) and
+// therefore everything scoped to that profile id. Owner/full-access
+// only, and can't be used to delete yourself or another business_owner
+// account - an owner removing their own access, or one owner removing
+// another, is a business-transfer scenario this button isn't for.
+const deleteStaff = asyncHandler(async (req, res) => {
+  const { data: target } = await req.supabase
+    .from('profiles')
+    .select('id, name, role')
+    .eq('id', req.params.userId)
+    .eq('business_id', req.params.businessId)
+    .maybeSingle();
+  if (!target) return res.status(404).json({ message: 'Staff member not found' });
+  if (target.id === req.user.id) return res.status(400).json({ message: 'You cannot delete your own account' });
+  if (target.role !== 'staff') return res.status(400).json({ message: 'Only staff accounts can be deleted here' });
+
+  await revokeSessionsFor(target.id);
+
+  const { error } = await supabaseAdmin.auth.admin.deleteUser(target.id);
+  if (error) return res.status(400).json({ message: error.message });
+
+  await logAction({
+    businessId: req.params.businessId,
+    actor: req.user,
+    action: 'staff_deleted',
+    targetId: target.id,
+    details: { accountName: target.name },
+  });
+
+  res.json({ message: 'Staff account deleted', id: target.id });
+});
+
 // @route POST /api/businesses/:businessId/staff/:userId/resend-invite
 // The other entry point for the same resend logic in inviteStaff above -
 // this one for a staff member who's already listed (so their email
@@ -321,4 +360,4 @@ const resendStaffInvite = asyncHandler(async (req, res) => {
   res.json({ message: 'Invite resent' });
 });
 
-module.exports = { inviteStaff, resendStaffInvite, listStaff, setStaffActive, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, listRolePermissions, resetPassword };
+module.exports = { inviteStaff, resendStaffInvite, listStaff, setStaffActive, deleteStaff, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, listRolePermissions, resetPassword };

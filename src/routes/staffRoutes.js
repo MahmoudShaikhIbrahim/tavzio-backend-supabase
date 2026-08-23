@@ -1,5 +1,5 @@
 const express = require('express');
-const { inviteStaff, resendStaffInvite, listStaff, setStaffActive, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, listRolePermissions, resetPassword } = require('../controllers/staffController');
+const { inviteStaff, resendStaffInvite, listStaff, setStaffActive, deleteStaff, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, listRolePermissions, resetPassword } = require('../controllers/staffController');
 const { issueAdminCard } = require('../controllers/cardController');
 const { protect, authorize, enforceTenant } = require('../middleware/auth');
 
@@ -12,6 +12,10 @@ router.use(protect, enforceTenant);
 router.post('/', authorize('business_owner', 'super_admin'), inviteStaff);
 router.get('/', listStaff);
 router.patch('/:userId', authorize('business_owner', 'super_admin'), setStaffActive);
+// Permanent removal - separate from the PATCH above, which only
+// deactivates (blocks login, keeps history). This deletes the account
+// outright; see deleteStaff for exactly what that cascades to.
+router.delete('/:userId', authorize('business_owner', 'super_admin'), deleteStaff);
 router.patch('/:userId/job-role', authorize('business_owner', 'super_admin'), setStaffJobRole);
 // Which dashboard sections this staff account is allowed to see - the
 // same "owner/super_admin manage, staff never touch their own" pattern

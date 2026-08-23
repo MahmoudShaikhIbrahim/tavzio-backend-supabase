@@ -1,7 +1,7 @@
 const asyncHandler = require('../utils/asyncHandler');
 const { supabaseAdmin } = require('../config/supabaseClient');
 const { logAction } = require('../utils/auditLog');
-const { resendInviteEmail, sendNewInviteEmail } = require('../utils/notifications');
+const { resendInviteEmail, sendNewInviteEmail, sendMail } = require('../utils/notifications');
 
 // ============================================================
 // Super admin: organization + membership management
@@ -460,6 +460,33 @@ const listOrgPurchaseOrders = asyncHandler(async (req, res) => {
 // bulk, distributing afterward. Each item's allocations must add up to
 // no more than the item's total ordered quantity - enforced here, not
 // left to the org_owner to get right by hand.
+// Emails the supplier a plain-text summary of what was ordered - this
+// used to only ever write internal DB rows (org's own tracking), with
+// no way for the actual supplier to find out an order exists short of
+// someone calling them. Uses the same Gmail-API sendMail as the rest of
+// the app (silently no-ops, logged not thrown, if ALERT_FROM_EMAIL/Gmail
+// creds aren't set - same graceful-missing-config pattern as everywhere
+// else), so placing an order never fails just because the email step
+// can't go out.
+async function notifySupplierOfOrder({ supplier, orgName, items, totalCostAed }) {
+  if (!supplier?.email) return;
+  const lines = items.map((i) => `- ${i.quantity} ${i.itemUnit || ''} ${i.itemName} @ AED ${Number(i.unitCostAed).toFixed(2)}/unit`);
+  const text = [
+    `New purchase order from ${orgName}.`,
+    '',
+    ...lines,
+    '',
+    `Total: AED ${totalCostAed.toFixed(2)}`,
+    '',
+    'Please confirm receipt of this order and expected delivery timing.',
+  ].join('\n');
+  try {
+    await sendMail({ to: supplier.email, subject: `New purchase order from ${orgName}`, text });
+  } catch (err) {
+    console.error('Supplier order email failed:', err.message);
+  }
+}
+
 const createOrgPurchaseOrder = asyncHandler(async (req, res) => {
   const { supplierId, items } = req.body;
   if (!Array.isArray(items) || items.length === 0) {
@@ -513,6 +540,14 @@ const createOrgPurchaseOrder = asyncHandler(async (req, res) => {
     targetId: po.id,
     details: { organizationId: req.orgId, itemCount: items.length, totalCostAed },
   });
+
+  if (supplierId) {
+    const [{ data: supplier }, { data: org }] = await Promise.all([
+      supabaseAdmin.from('suppliers').select('email').eq('id', supplierId).maybeSingle(),
+      supabaseAdmin.from('organizations').select('name').eq('id', req.orgId).maybeSingle(),
+    ]);
+    await notifySupplierOfOrder({ supplier, orgName: org?.name || 'Tavzio', items, totalCostAed });
+  }
 
   res.status(201).json(po);
 });
