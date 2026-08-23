@@ -4,6 +4,8 @@ const {
   requireOrgOwner, getMyOrganization,
   listOrgMenuCategories, createOrgMenuCategory, createOrgMenuItem, updateOrgMenuItem, deleteOrgMenuItem,
   publishMenuToLocations, getConsolidatedReport, getHotelConsolidatedReport,
+  listOrgSuppliers, createOrgSupplier, updateOrgSupplier, deleteOrgSupplier,
+  listOrgPurchaseOrders, createOrgPurchaseOrder,
 } = require('../controllers/organizationController');
 const { protect, authorize } = require('../middleware/auth');
 
@@ -27,5 +29,13 @@ router.delete('/menu/items/:itemId', authorize('org_owner', 'super_admin'), requ
 router.post('/menu/publish', authorize('org_owner', 'super_admin'), requireOrgOwner, publishMenuToLocations);
 router.get('/report', authorize('org_owner', 'super_admin'), requireOrgOwner, getConsolidatedReport);
 router.get('/report/hotel', authorize('org_owner', 'super_admin'), requireOrgOwner, getHotelConsolidatedReport);
+
+// Supply chain: shared suppliers, POs split across member businesses
+router.get('/suppliers', authorize('org_owner', 'super_admin'), requireOrgOwner, listOrgSuppliers);
+router.post('/suppliers', authorize('org_owner', 'super_admin'), requireOrgOwner, createOrgSupplier);
+router.patch('/suppliers/:supplierId', authorize('org_owner', 'super_admin'), requireOrgOwner, updateOrgSupplier);
+router.delete('/suppliers/:supplierId', authorize('org_owner', 'super_admin'), requireOrgOwner, deleteOrgSupplier);
+router.get('/purchase-orders', authorize('org_owner', 'super_admin'), requireOrgOwner, listOrgPurchaseOrders);
+router.post('/purchase-orders', authorize('org_owner', 'super_admin'), requireOrgOwner, createOrgPurchaseOrder);
 
 module.exports = router;

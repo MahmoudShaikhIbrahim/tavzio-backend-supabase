@@ -129,6 +129,23 @@ const login = asyncHandler(async (req, res) => {
     .update({ last_login_at: new Date().toISOString() })
     .eq('id', data.user.id);
 
+  // Real requirement: only one active session per account, anywhere -
+  // logging in on a second tab/device must sign the first one out
+  // automatically, not just let both sit open. This is Supabase Auth's
+  // own built-in scoped sign-out (scope: 'others'), not a hand-rolled
+  // session table - it revokes the access AND refresh token for every
+  // OTHER session tied to this account, using the brand-new session's
+  // own token to identify "this one, keep it" vs everything else.
+  // Enforcement is real (the other tab's token is genuinely dead at
+  // Supabase's end), even though the other tab won't visibly redirect
+  // to login until its next request - useSession's existing 20s cache
+  // cycle and authFetch's existing 401-refresh-fail-redirect logic
+  // (both already in the frontend) are what make that happen, with no
+  // frontend changes needed for this.
+  await supabaseAdmin.auth.admin.signOut(data.session.access_token, 'others').catch((err) => {
+    console.error('Could not revoke other sessions on login:', err.message);
+  });
+
   res.json({
     accessToken: data.session.access_token,
     refreshToken: data.session.refresh_token,

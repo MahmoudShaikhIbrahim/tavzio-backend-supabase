@@ -351,9 +351,144 @@ const getHotelConsolidatedReport = asyncHandler(async (req, res) => {
   });
 });
 
+// --- Org-level supply chain: shared suppliers, purchase orders split
+// across member businesses. See migrations 0090/0091 for the schema
+// reasoning - suppliers/POs here carry organization_id instead of
+// business_id, and ingredient_id on a PO item is intentionally absent
+// until allocation, since an org-level item has no single business's
+// ingredient to reference yet. ---
+
+const listOrgSuppliers = asyncHandler(async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from('suppliers')
+    .select('*')
+    .eq('organization_id', req.orgId)
+    .order('name');
+  if (error) return res.status(400).json({ message: error.message });
+  res.json(data);
+});
+
+const createOrgSupplier = asyncHandler(async (req, res) => {
+  const { name, contactName = '', phone = '', email = '' } = req.body;
+  if (!name) return res.status(400).json({ message: 'name is required' });
+  const { data, error } = await supabaseAdmin
+    .from('suppliers')
+    .insert({ name, contact_name: contactName, phone, email, organization_id: req.orgId })
+    .select()
+    .single();
+  if (error) return res.status(400).json({ message: error.message });
+  res.status(201).json(data);
+});
+
+const updateOrgSupplier = asyncHandler(async (req, res) => {
+  const { name, contactName, phone, email } = req.body;
+  const update = {};
+  if (name !== undefined) update.name = name;
+  if (contactName !== undefined) update.contact_name = contactName;
+  if (phone !== undefined) update.phone = phone;
+  if (email !== undefined) update.email = email;
+
+  const { data, error } = await supabaseAdmin
+    .from('suppliers')
+    .update(update)
+    .eq('id', req.params.supplierId)
+    .eq('organization_id', req.orgId)
+    .select()
+    .single();
+  if (error || !data) return res.status(404).json({ message: 'Supplier not found' });
+  res.json(data);
+});
+
+const deleteOrgSupplier = asyncHandler(async (req, res) => {
+  const { error, count } = await supabaseAdmin
+    .from('suppliers')
+    .delete({ count: 'exact' })
+    .eq('id', req.params.supplierId)
+    .eq('organization_id', req.orgId);
+  if (error) return res.status(400).json({ message: error.message });
+  if (!count) return res.status(404).json({ message: 'Supplier not found' });
+  res.json({ message: 'Deleted' });
+});
+
+const listOrgPurchaseOrders = asyncHandler(async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from('purchase_orders')
+    .select('*, suppliers(name), purchase_order_items(id, item_name, item_unit, quantity, unit_cost_aed, purchase_order_allocations(id, business_id, quantity, received, businesses(name)))')
+    .eq('organization_id', req.orgId)
+    .order('ordered_at', { ascending: false });
+  if (error) return res.status(400).json({ message: error.message });
+  res.json(data);
+});
+
+// @route POST /api/organizations/purchase-orders
+// Body: { supplierId, items: [{ itemName, itemUnit, quantity, unitCostAed, allocations: [{ businessId, quantity }] }] }
+// One PO, one supplier relationship, split however the org_owner wants
+// across whichever member businesses actually need a share - buying in
+// bulk, distributing afterward. Each item's allocations must add up to
+// no more than the item's total ordered quantity - enforced here, not
+// left to the org_owner to get right by hand.
+const createOrgPurchaseOrder = asyncHandler(async (req, res) => {
+  const { supplierId, items } = req.body;
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ message: 'At least one item is required' });
+  }
+  for (const item of items) {
+    const allocated = (item.allocations || []).reduce((sum, a) => sum + Number(a.quantity), 0);
+    if (allocated > Number(item.quantity)) {
+      return res.status(400).json({ message: `"${item.itemName}" is allocated to businesses for more than was ordered (${allocated} allocated, ${item.quantity} ordered).` });
+    }
+  }
+
+  const totalCostAed = items.reduce((sum, i) => sum + Number(i.quantity) * Number(i.unitCostAed), 0);
+
+  const { data: po, error } = await supabaseAdmin
+    .from('purchase_orders')
+    .insert({ organization_id: req.orgId, supplier_id: supplierId || null, total_cost_aed: totalCostAed, created_by: req.user.id })
+    .select()
+    .single();
+  if (error) return res.status(400).json({ message: error.message });
+
+  for (const item of items) {
+    const { data: poItem, error: itemError } = await supabaseAdmin
+      .from('purchase_order_items')
+      .insert({
+        purchase_order_id: po.id,
+        item_name: item.itemName,
+        item_unit: item.itemUnit || '',
+        quantity: Number(item.quantity),
+        unit_cost_aed: Number(item.unitCostAed),
+      })
+      .select()
+      .single();
+    if (itemError) return res.status(400).json({ message: itemError.message });
+
+    if (item.allocations && item.allocations.length > 0) {
+      const allocationRows = item.allocations.map((a) => ({
+        purchase_order_item_id: poItem.id,
+        business_id: a.businessId,
+        quantity: Number(a.quantity),
+      }));
+      const { error: allocError } = await supabaseAdmin.from('purchase_order_allocations').insert(allocationRows);
+      if (allocError) return res.status(400).json({ message: allocError.message });
+    }
+  }
+
+  await logAction({
+    businessId: null,
+    actor: req.user,
+    action: 'org_purchase_order_created',
+    targetId: po.id,
+    details: { organizationId: req.orgId, itemCount: items.length, totalCostAed },
+  });
+
+  res.status(201).json(po);
+});
+
 module.exports = {
   listOrganizations, createOrganization, setBusinessOrganization, inviteOrgOwner,
   requireOrgOwner, getMyOrganization,
   listOrgMenuCategories, createOrgMenuCategory, createOrgMenuItem, updateOrgMenuItem, deleteOrgMenuItem,
   publishMenuToLocations, getConsolidatedReport, getHotelConsolidatedReport,
+  listOrgSuppliers, createOrgSupplier, updateOrgSupplier, deleteOrgSupplier,
+  listOrgPurchaseOrders, createOrgPurchaseOrder,
 };

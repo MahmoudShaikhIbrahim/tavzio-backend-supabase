@@ -8,12 +8,12 @@ const asyncHandler = require('../utils/asyncHandler');
 // contact method only). source distinguishes which one a given lead
 // came from; only get_started requires businessType.
 const submitLead = asyncHandler(async (req, res) => {
-  const { email, phone, businessType, standsEstimate, note = '', source = 'get_started', preferredContactMethod } = req.body;
+  const { email, phone, businessName, businessType, standsEstimate, note = '', source = 'get_started', preferredContactMethod, currentPosSystem = '' } = req.body;
   if (!email || !phone) {
     return res.status(400).json({ message: 'email and phone are required' });
   }
-  if (source === 'get_started' && !businessType) {
-    return res.status(400).json({ message: 'businessType is required' });
+  if (source === 'get_started' && (!businessName || !businessType)) {
+    return res.status(400).json({ message: 'businessName and businessType are required' });
   }
   if (source === 'pricing_inquiry' && !['email', 'phone'].includes(preferredContactMethod)) {
     return res.status(400).json({ message: 'preferredContactMethod must be "email" or "phone"' });
@@ -23,8 +23,10 @@ const submitLead = asyncHandler(async (req, res) => {
     .from('leads')
     .insert({
       email, phone, source,
+      business_name: businessName || '',
       business_type: businessType || null,
       stands_estimate: Number(standsEstimate) || 0,
+      current_pos_system: currentPosSystem,
       preferred_contact_method: preferredContactMethod || null,
       note,
     })
