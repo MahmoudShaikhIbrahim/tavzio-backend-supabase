@@ -178,6 +178,39 @@ const resolveCardTap = asyncHandler(async (req, res) => {
 
   if (eventError) return res.status(400).json({ message: eventError.message });
 
+  // Real requirement: a tap on a table that has a confirmed,
+  // not-yet-arrived reservation assigned to it shows the arrival
+  // confirmation screen instead of the normal landing page - this is
+  // the customer-side half of the dual arrival-confirmation flow (the
+  // other half is staff marking it directly from the bookings list).
+  // Uses idx_bookings_table_arrival (migration 0092), so this is a
+  // fast, targeted lookup on every tap, not a scan. Deliberately shown
+  // instead of routed straight through - the guest confirms with a
+  // single tap on THIS screen (not silently auto-confirmed by the NFC
+  // tap alone), so a walk-in group who happens to sit at a table with
+  // someone else's pending reservation sees a name and time that isn't
+  // theirs and won't confirm it - see PublicBookingArrivalPage.tsx.
+  //
+  // customer_phone_verified is the real gate here, not just an
+  // incidental filter: this whole flow's trust model rests on having
+  // OTP-verified the guest's identity at booking time, which only ever
+  // happens for an online booking. A phone or walk-in reservation
+  // (createBooking in bookingController.js) never sets this to true,
+  // so it never triggers this screen, exactly as confirmed - staff
+  // handle those arrivals entirely themselves, the same way they
+  // always have.
+  const { data: pendingArrival } = await supabaseAdmin
+    .from('bookings')
+    .select('id, guest_name, party_size, requested_at')
+    .eq('table_id', effectiveCardId)
+    .eq('status', 'confirmed')
+    .eq('arrival_status', 'not_arrived')
+    .eq('customer_phone_verified', true)
+    .maybeSingle();
+  if (pendingArrival) {
+    return res.json({ redirect: `/${business.slug}/arrival/${pendingArrival.id}`, tapEventId: event.id });
+  }
+
   // Real fix: every hotel card now routes to the unified guest portal -
   // room-bound (in-room stand) or not (lobby/reception/unassigned stand).
   // Previously only room-bound cards got here; anything else silently

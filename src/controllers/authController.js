@@ -323,6 +323,25 @@ const changePassword = asyncHandler(async (req, res) => {
   res.json({ message: 'Password updated' });
 });
 
+// @route POST /api/auth/complete-invite
+// Real fix for a confirmed bug: someone completing an invite/recovery
+// link (see AdminLogin.tsx's SetPasswordForm) already set their own new
+// password directly via Supabase's own updateUser() - they never had a
+// "current" password to verify the way changePassword above requires,
+// since they authenticated via a single-use, Supabase-verified link,
+// not a known existing password. Without this, must_change_password
+// stayed true forever after completing an invite, and every layout's
+// forced-change gate would try to render the standard changePassword
+// form next - which itself demands a "current password" that never
+// existed for this account, an unwinnable dead end. Reaching this
+// endpoint at all already proves the caller holds a freshly-issued,
+// valid session - that IS the verification, so no separate password
+// check is needed here the way changePassword needs one.
+const completeInvite = asyncHandler(async (req, res) => {
+  await supabaseAdmin.from('profiles').update({ must_change_password: false }).eq('id', req.user.id);
+  res.json({ message: 'Invite completed' });
+});
+
 // @route PATCH /api/auth/email
 // Body: { currentPassword, newEmail }
 // Same security discipline as changePassword above: verifying the
@@ -365,4 +384,4 @@ const changeMyEmail = asyncHandler(async (req, res) => {
   res.json({ message: 'Email updated', email: newEmail });
 });
 
-module.exports = { register, login, refresh, me, updateMyTheme, updateMyLanguage, updateMyTour, changeMyEmail, confirmDevice, changePassword };
+module.exports = { register, login, refresh, me, updateMyTheme, updateMyLanguage, updateMyTour, changeMyEmail, confirmDevice, changePassword, completeInvite };

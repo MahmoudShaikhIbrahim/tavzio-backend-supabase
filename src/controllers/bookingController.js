@@ -5,7 +5,7 @@ const { logAction } = require('../utils/auditLog');
 const listBookings = asyncHandler(async (req, res) => {
   let query = req.supabase
     .from('bookings')
-    .select('*, cards(label)')
+    .select('*, cards(label), booking_items(id, menu_item_id, item_name, quantity, unit_price)')
     .eq('business_id', req.params.businessId)
     .order('requested_at', { ascending: true });
 
@@ -78,4 +78,24 @@ const updateBookingStatus = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
-module.exports = { listBookings, createBooking, updateBookingStatus };
+// @route POST /api/businesses/:businessId/bookings/:bookingId/confirm-arrival
+// The staff-side half of the dual arrival-confirmation flow - a host
+// spots the guest and marks it directly, same effect as the guest's
+// own table-tap confirmation, whichever happens first wins.
+const confirmArrivalByStaff = asyncHandler(async (req, res) => {
+  const { data: booking, error } = await req.supabase
+    .from('bookings')
+    .update({ arrival_status: 'arrived', arrived_at: new Date().toISOString(), arrived_via: 'staff' })
+    .eq('id', req.params.bookingId)
+    .eq('business_id', req.params.businessId)
+    .eq('status', 'confirmed')
+    .eq('arrival_status', 'not_arrived')
+    .select()
+    .single();
+  if (error || !booking) return res.status(400).json({ message: 'Could not confirm arrival - it may have already been confirmed' });
+
+  await logAction({ businessId: req.params.businessId, actor: req.user, action: 'booking_arrival_confirmed', targetId: booking.id, details: { via: 'staff' } });
+  res.json(booking);
+});
+
+module.exports = { listBookings, createBooking, updateBookingStatus, confirmArrivalByStaff };

@@ -97,8 +97,10 @@ app.listen(PORT, () => console.log(`Tavzio API (Supabase) running on port ${PORT
 // staff-initiated card_online POS sale.
 const { reconcilePendingBillPayments, reconcilePendingOrderPayments } = require('./controllers/publicController');
 const { reconcilePendingPosCardPayments } = require('./controllers/orderController');
+const { reconcilePendingBookingPayments } = require('./controllers/bookingPublicController');
 setInterval(() => {
   reconcilePendingBillPayments().catch((err) => console.error('Bill payment reconciliation run failed:', err.message));
   reconcilePendingOrderPayments().catch((err) => console.error('Order payment reconciliation run failed:', err.message));
   reconcilePendingPosCardPayments().catch((err) => console.error('POS card payment reconciliation run failed:', err.message));
+  reconcilePendingBookingPayments().catch((err) => console.error('Booking payment reconciliation run failed:', err.message));
 }, 2 * 60 * 1000);

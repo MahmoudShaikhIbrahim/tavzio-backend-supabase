@@ -1,0 +1,375 @@
+const { supabaseAdmin } = require('../config/supabaseClient');
+const asyncHandler = require('../utils/asyncHandler');
+const { logAction } = require('../utils/auditLog');
+const { sendOtp, validateOtp } = require('../utils/smsAdapter');
+const { decryptConfig } = require('../utils/credentialEncryption');
+const { primaryClientUrl } = require('../utils/clientUrl');
+
+const OTP_EXPIRY_MINUTES = 10;
+const OTP_MAX_ATTEMPTS = 5;
+// A verified phone stays "usable" for this long after verifying, so the
+// customer doesn't have to re-verify if they take a few minutes filling
+// out the rest of the form (picking food, choosing a time) after the
+// code lands - but a verification from an hour ago can't be replayed
+// to skip verification on a brand new booking attempt.
+const VERIFIED_WINDOW_MINUTES = 30;
+
+// @route GET /api/public/business/:slug/booking-config
+// What the public booking page actually needs to know before it can
+// render itself correctly: is booking even on, does this business take
+// pre-orders alongside a reservation, is a down payment required (and
+// how much), and - only if pre-order is on - the actual menu to choose
+// from. One call, everything the form needs to decide its own shape.
+const getBookingConfig = asyncHandler(async (req, res) => {
+  const { data: business, error } = await supabaseAdmin
+    .from('businesses')
+    .select('id, name, features')
+    .eq('slug', req.params.slug)
+    .eq('status', 'active')
+    .maybeSingle();
+  if (error || !business) return res.status(404).json({ message: 'Business not found' });
+
+  const booking = business.features?.onlineBooking || {};
+  if (!booking.enabled) return res.status(404).json({ message: 'Online booking is not available for this business' });
+
+  let menu = [];
+  if (booking.allowPreOrder) {
+    const { data: items } = await supabaseAdmin
+      .from('menu_items')
+      .select('id, name, price, description, image_url, category_id, menu_categories(name)')
+      .eq('business_id', business.id)
+      .eq('is_available', true)
+      .order('sort_order');
+    menu = items || [];
+  }
+
+  res.json({
+    businessName: business.name,
+    allowPreOrder: !!booking.allowPreOrder,
+    downPayment: booking.downPayment || { enabled: false },
+    menu,
+  });
+});
+
+// @route POST /api/public/business/:slug/booking-otp/request
+// Body: { phone }
+// Verify Now generates and holds the actual OTP on their side - we just
+// store the verificationId it hands back, and a fresh one every time so
+// a customer who fat-fingered their number and requests again gets a
+// verificationId that actually matches what they'll receive, not a
+// stale one still counting down from the typo.
+const requestBookingOtp = asyncHandler(async (req, res) => {
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ message: 'phone is required' });
+
+  const { data: business } = await supabaseAdmin.from('businesses').select('id').eq('slug', req.params.slug).eq('status', 'active').maybeSingle();
+  if (!business) return res.status(404).json({ message: 'Business not found' });
+
+  const sendResult = await sendOtp(phone);
+  if (!sendResult.success) return res.status(502).json({ message: sendResult.error || 'Could not send verification code' });
+
+  const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60000).toISOString();
+  const { error } = await supabaseAdmin.from('booking_otp_codes').insert({
+    business_id: business.id, phone, verification_id: sendResult.verificationId, expires_at: expiresAt,
+  });
+  if (error) return res.status(400).json({ message: error.message });
+
+  res.json({ message: 'Verification code sent' });
+});
+
+// @route POST /api/public/business/:slug/booking-otp/verify
+// Body: { phone, code }
+const verifyBookingOtp = asyncHandler(async (req, res) => {
+  const { phone, code } = req.body;
+  if (!phone || !code) return res.status(400).json({ message: 'phone and code are required' });
+
+  const { data: business } = await supabaseAdmin.from('businesses').select('id').eq('slug', req.params.slug).eq('status', 'active').maybeSingle();
+  if (!business) return res.status(404).json({ message: 'Business not found' });
+
+  const { data: record } = await supabaseAdmin
+    .from('booking_otp_codes')
+    .select('*')
+    .eq('business_id', business.id)
+    .eq('phone', phone)
+    .is('verified_at', null)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!record) return res.status(400).json({ message: 'No pending verification for this number - request a new code' });
+  if (new Date(record.expires_at) < new Date()) return res.status(400).json({ message: 'This code has expired - request a new one' });
+  if (record.attempts >= OTP_MAX_ATTEMPTS) return res.status(429).json({ message: 'Too many attempts - request a new code' });
+
+  const validateResult = await validateOtp(record.verification_id, code);
+  if (!validateResult.success) {
+    await supabaseAdmin.from('booking_otp_codes').update({ attempts: record.attempts + 1 }).eq('id', record.id);
+    return res.status(400).json({ message: validateResult.error || 'Incorrect code' });
+  }
+
+  await supabaseAdmin.from('booking_otp_codes').update({ verified_at: new Date().toISOString() }).eq('id', record.id);
+  res.json({ message: 'Phone verified' });
+});
+
+function computeDownPayment(downPaymentConfig, orderTotal) {
+  if (!downPaymentConfig?.enabled) return 0;
+  if (downPaymentConfig.mode === 'full') return orderTotal;
+  if (downPaymentConfig.mode === 'percentage') return Math.round(orderTotal * (Number(downPaymentConfig.value) || 0) / 100 * 100) / 100;
+  if (downPaymentConfig.mode === 'fixed') return Number(downPaymentConfig.value) || 0;
+  return 0;
+}
+
+// @route POST /api/public/business/:slug/bookings
+// Body: { phone, guestName, partySize, requestedAt, note?, items?: [{menuItemId, quantity}], foodReadyOffsetMinutes? }
+// Requires a phone verified within the last VERIFIED_WINDOW_MINUTES -
+// this is the real gate keeping an unverified booking from ever being
+// created at all, not a UI-only check the frontend could skip.
+const createPublicBooking = asyncHandler(async (req, res) => {
+  const { phone, guestName, partySize, requestedAt, note = '', items = [], foodReadyOffsetMinutes } = req.body;
+  if (!phone || !guestName || !partySize || !requestedAt) {
+    return res.status(400).json({ message: 'phone, guestName, partySize, and requestedAt are required' });
+  }
+
+  const { data: business } = await supabaseAdmin.from('businesses').select('id, name, features').eq('slug', req.params.slug).eq('status', 'active').maybeSingle();
+  if (!business) return res.status(404).json({ message: 'Business not found' });
+
+  const bookingConfig = business.features?.onlineBooking || {};
+  if (!bookingConfig.enabled) return res.status(404).json({ message: 'Online booking is not available for this business' });
+
+  const { data: verified } = await supabaseAdmin
+    .from('booking_otp_codes')
+    .select('id')
+    .eq('business_id', business.id)
+    .eq('phone', phone)
+    .not('verified_at', 'is', null)
+    .gte('verified_at', new Date(Date.now() - VERIFIED_WINDOW_MINUTES * 60000).toISOString())
+    .order('verified_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!verified) return res.status(400).json({ message: 'Verify your phone number first' });
+
+  // Pre-order items only matter (and only get priced/validated) when
+  // the business actually allows them - a booking-only business simply
+  // never receives an items array from its own frontend, but this is
+  // enforced here too, not just left to the UI to behave.
+  let itemRows = [];
+  let itemsTotal = 0;
+  if (bookingConfig.allowPreOrder && items.length > 0) {
+    const menuItemIds = items.map((i) => i.menuItemId);
+    const { data: menuItems } = await supabaseAdmin.from('menu_items').select('id, name, price').eq('business_id', business.id).in('id', menuItemIds);
+    for (const item of items) {
+      const menuItem = (menuItems || []).find((m) => m.id === item.menuItemId);
+      if (!menuItem) continue;
+      const quantity = Math.max(1, Number(item.quantity) || 1);
+      itemsTotal += menuItem.price * quantity;
+      itemRows.push({ menu_item_id: menuItem.id, item_name: menuItem.name, quantity, unit_price: menuItem.price });
+    }
+  }
+
+  const downPaymentAmount = computeDownPayment(bookingConfig.downPayment, itemsTotal);
+
+  const { data: booking, error: bookingError } = await supabaseAdmin
+    .from('bookings')
+    .insert({
+      business_id: business.id,
+      guest_name: guestName,
+      contact_phone: phone,
+      party_size: partySize,
+      requested_at: requestedAt,
+      note,
+      status: 'pending',
+      customer_phone_verified: true,
+      food_ready_offset_minutes: itemRows.length > 0 ? (foodReadyOffsetMinutes ?? 0) : null,
+      down_payment_required_aed: downPaymentAmount,
+      down_payment_status: downPaymentAmount > 0 ? 'pending' : 'not_required',
+    })
+    .select()
+    .single();
+  if (bookingError) return res.status(400).json({ message: bookingError.message });
+
+  if (itemRows.length > 0) {
+    await supabaseAdmin.from('booking_items').insert(itemRows.map((r) => ({ ...r, booking_id: booking.id })));
+  }
+
+  await logAction({ businessId: business.id, actor: null, action: 'reservation_created', targetId: booking.id, details: { guestName, partySize, requestedAt, source: 'online' } });
+
+  // No down payment required - the booking is created, done, staff
+  // will confirm it same as any other pending booking.
+  if (downPaymentAmount <= 0) {
+    return res.status(201).json({ booking, paymentRequired: false });
+  }
+
+  // Down payment required - same 4-provider adapter interface every
+  // other redirect-based payment in this codebase already uses (see
+  // publicController.js's order/bill payment-session flow), just for a
+  // booking instead of an order.
+  const { data: paymentIntegration } = await supabaseAdmin
+    .from('pos_integrations')
+    .select('config')
+    .eq('business_id', business.id)
+    .eq('purpose', 'payment')
+    .eq('enabled', true)
+    .maybeSingle();
+  if (!paymentIntegration) {
+    await supabaseAdmin.from('bookings').update({ down_payment_status: 'failed' }).eq('id', booking.id);
+    return res.status(400).json({ message: 'This business has a down payment set up but no payment method connected - contact them directly.' });
+  }
+
+  const config = decryptConfig(paymentIntegration.config);
+  const provider = config?.provider || 'tap';
+
+  const { data: payment, error: paymentError } = await supabaseAdmin
+    .from('payments')
+    .insert({ business_id: business.id, booking_id: booking.id, amount: downPaymentAmount, status: 'pending', provider })
+    .select()
+    .single();
+  if (paymentError) return res.status(400).json({ message: paymentError.message });
+
+  const returnUrl = `${primaryClientUrl()}/${req.params.slug}/book?bookingPaymentId=${payment.id}`;
+  const adapter = provider === 'tap'
+    ? require('../utils/tapPaymentsAdapter')
+    : provider === 'telr'
+    ? require('../utils/telrAdapter')
+    : provider === 'ngenius'
+    ? require('../utils/ngeniusAdapter')
+    : require('../utils/ziinaBillAdapter');
+
+  const session = await adapter.createPaymentSession(config, downPaymentAmount, 'Tavzio booking down payment', payment.id, returnUrl);
+  if (!session.success) {
+    await supabaseAdmin.from('payments').update({ status: 'failed', failure_reason: session.error || '' }).eq('id', payment.id);
+    await supabaseAdmin.from('bookings').update({ down_payment_status: 'failed' }).eq('id', booking.id);
+    return res.status(502).json({ message: session.error || 'Could not start the payment' });
+  }
+
+  await supabaseAdmin.from('payments').update({ provider_ref: session.providerRef }).eq('id', payment.id);
+  res.status(201).json({ booking, paymentRequired: true, redirectUrl: session.redirectUrl, paymentId: payment.id });
+});
+
+// @route GET /api/public/bookings/:bookingId/status
+// Polled by the booking page after a redirect-based down payment
+// returns, to find out whether it actually went through - same
+// "poll after redirect" pattern the order/bill payment flows already
+// use, not something new invented for this.
+const getBookingPaymentStatus = asyncHandler(async (req, res) => {
+  const { data: booking } = await supabaseAdmin.from('bookings').select('id, status, down_payment_status').eq('id', req.params.bookingId).maybeSingle();
+  if (!booking) return res.status(404).json({ message: 'Booking not found' });
+  res.json(booking);
+});
+
+// @route GET /api/public/bookings/:bookingId/arrival
+// What the arrival-confirmation screen shows after a table tap - only
+// returns anything for a booking that's actually confirmed and still
+// waiting on arrival, so a stale or already-arrived booking doesn't
+// show a confirm button that would just be re-confirming nothing.
+const getBookingArrival = asyncHandler(async (req, res) => {
+  const { data: booking } = await supabaseAdmin
+    .from('bookings')
+    .select('id, guest_name, party_size, requested_at, status, arrival_status, customer_phone_verified')
+    .eq('id', req.params.bookingId)
+    .maybeSingle();
+  // Same real gate as resolveCardTap in publicController.js, enforced
+  // here independently too - this endpoint is reachable directly by
+  // id, not only via a table tap, so it needs its own check rather
+  // than trusting that every caller arrived through the tap-routing
+  // path that already filters on this.
+  if (!booking || booking.status !== 'confirmed' || booking.arrival_status !== 'not_arrived' || !booking.customer_phone_verified) {
+    return res.status(404).json({ message: 'No pending arrival for this booking' });
+  }
+  res.json(booking);
+});
+
+// @route POST /api/public/bookings/:bookingId/confirm-arrival
+// The customer-side half of the dual arrival-confirmation flow - one
+// tap on "Yes, that's us" on the screen the table tap already routed
+// them to (see resolveCardTap in publicController.js).
+const confirmArrivalByCustomer = asyncHandler(async (req, res) => {
+  // Same reasoning as getBookingArrival above - this must independently
+  // enforce customer_phone_verified too, not just rely on the earlier
+  // GET already having filtered it out, since this endpoint could be
+  // called directly with any booking id.
+  const { data: booking, error } = await supabaseAdmin
+    .from('bookings')
+    .update({ arrival_status: 'arrived', arrived_at: new Date().toISOString(), arrived_via: 'customer_tap' })
+    .eq('id', req.params.bookingId)
+    .eq('status', 'confirmed')
+    .eq('arrival_status', 'not_arrived')
+    .eq('customer_phone_verified', true)
+    .select()
+    .single();
+  if (error || !booking) return res.status(400).json({ message: 'Could not confirm arrival - it may have already been confirmed' });
+
+  await logAction({ businessId: booking.business_id, actor: null, action: 'booking_arrival_confirmed', targetId: booking.id, details: { via: 'customer_tap' } });
+  res.json(booking);
+});
+
+// Same reconciliation pattern as reconcilePendingOrderPayments/
+// reconcilePendingBillPayments in publicController.js - a redirect-
+// based payment (all 4 providers now, including tap - see
+// tapPaymentsAdapter.js's new createPaymentSession/checkPaymentStatus,
+// added specifically for this booking flow) resolves on the gateway's
+// own hosted page, so this polls to confirm what actually happened
+// rather than trusting the browser to make it back to a returnUrl.
+const RECONCILE_AFTER_MINUTES = 2;
+const GIVE_UP_AFTER_HOURS = 24;
+
+async function reconcilePendingBookingPayments() {
+  const cutoff = new Date(Date.now() - RECONCILE_AFTER_MINUTES * 60000).toISOString();
+  const giveUpCutoff = new Date(Date.now() - GIVE_UP_AFTER_HOURS * 3600000).toISOString();
+
+  const { data: stuckPayments } = await supabaseAdmin
+    .from('payments')
+    .select('*')
+    .eq('status', 'pending')
+    .not('booking_id', 'is', null)
+    .lt('created_at', cutoff);
+
+  for (const payment of stuckPayments || []) {
+    if (payment.created_at < giveUpCutoff) {
+      await supabaseAdmin.from('payments').update({ status: 'failed', failure_reason: 'Never confirmed - gave up after 24 hours' }).eq('id', payment.id);
+      await supabaseAdmin.from('bookings').update({ down_payment_status: 'failed' }).eq('id', payment.booking_id);
+      continue;
+    }
+
+    try {
+      const { data: integration } = await supabaseAdmin
+        .from('pos_integrations')
+        .select('config')
+        .eq('business_id', payment.business_id)
+        .eq('purpose', 'payment')
+        .eq('enabled', true)
+        .maybeSingle();
+      if (!integration) continue;
+
+      const config = decryptConfig(integration.config);
+      const adapter = payment.provider === 'tap'
+        ? require('../utils/tapPaymentsAdapter')
+        : payment.provider === 'telr'
+        ? require('../utils/telrAdapter')
+        : payment.provider === 'ngenius'
+        ? require('../utils/ngeniusAdapter')
+        : require('../utils/ziinaBillAdapter');
+
+      const check = await adapter.checkPaymentStatus(config, payment.provider_ref);
+      if (!check.success || !check.paid) continue;
+
+      await supabaseAdmin.from('payments').update({ status: 'completed' }).eq('id', payment.id);
+      const { data: booking } = await supabaseAdmin
+        .from('bookings')
+        .update({ down_payment_status: 'paid', status: 'confirmed' })
+        .eq('id', payment.booking_id)
+        .select()
+        .single();
+
+      if (booking) {
+        await logAction({ businessId: payment.business_id, actor: null, action: 'booking_down_payment_charged', targetId: booking.id, details: { amount: payment.amount } });
+      }
+    } catch (err) {
+      console.error(`Booking payment reconciliation failed for payment ${payment.id}:`, err.message);
+    }
+  }
+}
+
+module.exports = {
+  getBookingConfig, requestBookingOtp, verifyBookingOtp, createPublicBooking,
+  getBookingPaymentStatus, getBookingArrival, confirmArrivalByCustomer,
+  reconcilePendingBookingPayments,
+};
