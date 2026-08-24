@@ -1,6 +1,7 @@
 const PDFDocument = require('pdfkit');
 const asyncHandler = require('../utils/asyncHandler');
 const { calculateVatInclusive } = require('../utils/vat');
+const { supabaseAdmin } = require('../config/supabaseClient');
 
 function vatBreakdown(grossAmount) {
   const { subtotalExVat, vatAmount } = calculateVatInclusive(grossAmount);
@@ -261,14 +262,46 @@ const exportPayments = asyncHandler(async (req, res) => {
 const listPayments = asyncHandler(async (req, res) => {
   const { data, error } = await req.supabase
     .from('payments')
-    .select('*')
+    .select('*, cards(label)')
     .eq('business_id', req.params.businessId)
     .neq('status', 'pending')
     .order('created_at', { ascending: false })
     .limit(200);
 
   if (error) return res.status(400).json({ message: error.message });
-  res.json(data);
+
+  // Real "Table X: paid AED Y, AED Z left" status - not just a flat
+  // payment log with no idea which table it belonged to or what's
+  // still outstanding there. A completed payment only ever covers the
+  // specific order_items listed in order_item_ids (see the 0009
+  // migration's comment on that column) - what's LEFT on that same
+  // table is every other unpaid item across every order tied to the
+  // same card_id, computed fresh here rather than trusted from a
+  // snapshot that could go stale the moment a new item gets added to
+  // the table's order after this payment was taken.
+  const cardIds = [...new Set((data || []).map((p) => p.card_id).filter(Boolean))];
+  let remainingByCard = {};
+  if (cardIds.length > 0) {
+    const { data: unpaidItems } = await supabaseAdmin
+      .from('order_items')
+      .select('unit_price, quantity, orders!inner(card_id, business_id)')
+      .eq('paid', false)
+      .eq('orders.business_id', req.params.businessId)
+      .in('orders.card_id', cardIds);
+    remainingByCard = (unpaidItems || []).reduce((acc, item) => {
+      const cardId = item.orders.card_id;
+      acc[cardId] = (acc[cardId] || 0) + Number(item.unit_price) * item.quantity;
+      return acc;
+    }, {});
+  }
+
+  const enriched = (data || []).map((p) => ({
+    ...p,
+    tableLabel: p.cards?.label || null,
+    remainingAed: p.card_id ? Number((remainingByCard[p.card_id] || 0).toFixed(2)) : null,
+  }));
+
+  res.json(enriched);
 });
 
 module.exports = { exportOrders, exportBookings, exportPayments, listPayments };

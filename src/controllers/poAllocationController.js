@@ -44,6 +44,9 @@ const receivePoAllocation = asyncHandler(async (req, res) => {
     .eq('received', false)
     .maybeSingle();
   if (!allocation) return res.status(400).json({ message: 'Allocation not found or already received' });
+  if (!allocation.purchase_order_items) {
+    return res.status(400).json({ message: 'Could not load the purchase order item for this allocation - it may have been removed' });
+  }
 
   // Real, not silent - the same explainable-stock-movement discipline
   // as everywhere else in this schema. Creating this as a proper

@@ -8,7 +8,7 @@ const { submitCustomButtonRequest } = require('../controllers/customButtonContro
 const { createFolioPaymentSession, confirmFolioPayment } = require('../controllers/hotelPaymentController');
 const {
   getBookingConfig, requestBookingOtp, verifyBookingOtp, createPublicBooking,
-  getBookingPaymentStatus, getBookingArrival, confirmArrivalByCustomer,
+  getBookingPaymentStatus, getBookingArrival, confirmArrivalByCustomer, cancelPublicBooking,
 } = require('../controllers/bookingPublicController');
 const {
   resolveCardTap,
@@ -107,5 +107,6 @@ router.post('/business/:slug/bookings', createPublicBooking);
 router.get('/bookings/:bookingId/status', getBookingPaymentStatus);
 router.get('/bookings/:bookingId/arrival', getBookingArrival);
 router.post('/bookings/:bookingId/confirm-arrival', confirmArrivalByCustomer);
+router.post('/bookings/:bookingId/cancel', cancelPublicBooking);
 
 module.exports = router;

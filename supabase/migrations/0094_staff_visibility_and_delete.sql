@@ -15,3 +15,37 @@ create policy "business owner can read own business staff"
     and business_id = public.current_business_id()
     and (public.current_role_name() = 'business_owner' or public.current_role_name() = 'staff')
   );
+
+-- Real bug fix: org-level purchase orders have business_id = null
+-- (they use organization_id instead) - "tenant manages own purchase
+-- orders"/"tenant manages own po items" only ever matched
+-- business_id = current_business_id(), which an org-level PO's item
+-- never satisfies. A member business could see its OWN
+-- purchase_order_allocations row (that table's policy checks the
+-- allocation's own business_id directly, unaffected), but the embedded
+-- purchase_order_items(...) it points to came back null under RLS -
+-- which is exactly what crashed "Mark received" with "Cannot read
+-- properties of null (reading 'item_name')": the allocation was real,
+-- the item lookup silently wasn't.
+create policy "business can read po items for its own allocations"
+  on public.purchase_order_items for select
+  to authenticated
+  using (
+    exists (
+      select 1 from public.purchase_order_allocations poa
+      where poa.purchase_order_item_id = purchase_order_items.id
+        and poa.business_id = public.current_business_id()
+    )
+  );
+
+create policy "business can read org pos for its own allocations"
+  on public.purchase_orders for select
+  to authenticated
+  using (
+    exists (
+      select 1 from public.purchase_order_items poi
+      join public.purchase_order_allocations poa on poa.purchase_order_item_id = poi.id
+      where poi.purchase_order_id = purchase_orders.id
+        and poa.business_id = public.current_business_id()
+    )
+  );

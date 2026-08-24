@@ -147,6 +147,22 @@ const createPublicBooking = asyncHandler(async (req, res) => {
     .maybeSingle();
   if (!verified) return res.status(400).json({ message: 'Verify your phone number first' });
 
+  // Real customer profile, not just a phone string sitting on this one
+  // booking row - same find-or-create-by-phone pattern already used by
+  // the NFC loyalty check-in flow (publicController.js), so a guest who
+  // books online becomes the same kind of tracked customer a walk-in
+  // tap creates, shared across every business on Tavzio by phone. Name
+  // is filled in here (the loyalty check-in path never has one to
+  // offer) but never overwrites a name the customer already has on file
+  // from a previous visit elsewhere.
+  let { data: customer } = await supabaseAdmin.from('customers').select('id, name').eq('phone', phone).maybeSingle();
+  if (!customer) {
+    const { data: created } = await supabaseAdmin.from('customers').insert({ phone, name: guestName }).select('id, name').single();
+    customer = created;
+  } else if (!customer.name && guestName) {
+    await supabaseAdmin.from('customers').update({ name: guestName }).eq('id', customer.id);
+  }
+
   // Pre-order items only matter (and only get priced/validated) when
   // the business actually allows them - a booking-only business simply
   // never receives an items array from its own frontend, but this is
@@ -368,8 +384,52 @@ async function reconcilePendingBookingPayments() {
   }
 }
 
+// @route POST /api/public/bookings/:bookingId/cancel
+// Body: { phone }
+// The only "credential" a guest ever has in this whole flow is their
+// verified phone number - same trust model as confirmArrivalByCustomer
+// above. Matching contact_phone against the booking is what proves this
+// really is the person who made it, not a guessed booking id. Only
+// pending/confirmed bookings can be cancelled - already-completed,
+// already-declined, or already-cancelled bookings have nothing left to
+// cancel.
+const cancelPublicBooking = asyncHandler(async (req, res) => {
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ message: 'phone is required' });
+
+  const { data: booking } = await supabaseAdmin
+    .from('bookings')
+    .select('id, business_id, status, contact_phone')
+    .eq('id', req.params.bookingId)
+    .maybeSingle();
+  if (!booking || booking.contact_phone !== phone) {
+    return res.status(404).json({ message: 'Booking not found' });
+  }
+  if (!['pending', 'confirmed'].includes(booking.status)) {
+    return res.status(400).json({ message: 'This booking can no longer be cancelled' });
+  }
+
+  const { data: updated, error } = await supabaseAdmin
+    .from('bookings')
+    .update({ status: 'cancelled' })
+    .eq('id', booking.id)
+    .select()
+    .single();
+  if (error) return res.status(400).json({ message: error.message });
+
+  await logAction({
+    businessId: booking.business_id,
+    actor: null,
+    action: 'booking_cancelled_by_customer',
+    targetId: booking.id,
+    details: {},
+  });
+
+  res.json(updated);
+});
+
 module.exports = {
   getBookingConfig, requestBookingOtp, verifyBookingOtp, createPublicBooking,
-  getBookingPaymentStatus, getBookingArrival, confirmArrivalByCustomer,
+  getBookingPaymentStatus, getBookingArrival, confirmArrivalByCustomer, cancelPublicBooking,
   reconcilePendingBookingPayments,
 };
