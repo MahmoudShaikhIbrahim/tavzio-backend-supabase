@@ -5,7 +5,7 @@ const { logAction } = require('../utils/auditLog');
 const listBookings = asyncHandler(async (req, res) => {
   let query = req.supabase
     .from('bookings')
-    .select('*, cards(label), booking_items(id, menu_item_id, item_name, quantity, unit_price)')
+    .select('*, cards!table_id(label), booking_items(id, menu_item_id, item_name, quantity, unit_price)')
     .eq('business_id', req.params.businessId)
     .order('requested_at', { ascending: true });
 
@@ -45,7 +45,7 @@ const createBooking = asyncHandler(async (req, res) => {
       status: 'confirmed', // staff-created reservations are confirmed on the spot, not left pending for someone to approve their own phone call
       created_by_staff_id: req.user.id,
     })
-    .select('*, cards(label)')
+    .select('*, cards!table_id(label)')
     .single();
   if (error) return res.status(400).json({ message: error.message });
 
@@ -71,7 +71,7 @@ const updateBookingStatus = asyncHandler(async (req, res) => {
     .update(update)
     .eq('id', req.params.bookingId)
     .eq('business_id', req.params.businessId)
-    .select('*, cards(label)')
+    .select('*, cards!table_id(label)')
     .single();
 
   if (error || !data) return res.status(404).json({ message: 'Booking not found' });
