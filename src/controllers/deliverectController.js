@@ -25,6 +25,18 @@ function verifyDeliverectSignature(rawBody, signature, secret) {
 
 // @route POST /api/deliverect/register
 const registerPos = asyncHandler(async (req, res) => {
+  // Same gate as receiveOrder: unauthenticated by design (this is the
+  // partner-onboarding handshake, no user session exists), so the HMAC
+  // signature is the only thing standing between this and anyone who
+  // can guess a business_id flipping that business's delivery
+  // integration on. Fails closed until DELIVERECT_HMAC_SECRET is set,
+  // consistent with the rest of this file.
+  const secret = process.env.DELIVERECT_HMAC_SECRET;
+  const signature = req.headers['x-deliverect-hmac-sha256'] || req.headers['x-hmac-sha256'];
+  if (!verifyDeliverectSignature(req.rawBody, signature, secret)) {
+    return res.status(401).json({ message: 'Invalid or missing signature - Deliverect integration not fully configured yet' });
+  }
+
   const { locationId, externalLocationId } = req.body;
   if (!externalLocationId) return res.status(400).json({ message: 'externalLocationId is required' });
 
