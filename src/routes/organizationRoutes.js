@@ -1,6 +1,6 @@
 const express = require('express');
 const {
-  listOrganizations, createOrganization, setBusinessOrganization, inviteOrgOwner,
+  listOrganizations, createOrganization, deleteOrganization, setBusinessOrganization, inviteOrgOwner,
   requireOrgOwner, getMyOrganization,
   listOrgMenuCategories, createOrgMenuCategory, createOrgMenuItem, updateOrgMenuItem, deleteOrgMenuItem,
   publishMenuToLocations, getConsolidatedReport, getHotelConsolidatedReport,
@@ -16,6 +16,7 @@ router.use(protect);
 // Super admin: create orgs, link/unlink locations, invite org owners
 router.get('/', authorize('super_admin'), listOrganizations);
 router.post('/', authorize('super_admin'), createOrganization);
+router.delete('/:organizationId', authorize('super_admin'), deleteOrganization);
 router.patch('/businesses/:businessId/organization', authorize('super_admin'), setBusinessOrganization);
 router.post('/:organizationId/owner', authorize('super_admin'), inviteOrgOwner);
 

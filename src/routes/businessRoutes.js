@@ -37,6 +37,7 @@ const tableManagementRoutes = require('./tableManagementRoutes');
 const waitlistRoutes = require('./waitlistRoutes');
 const hotelRoutes = require('./hotelRoutes');
 const { getDeliveryIntegration, upsertDeliveryIntegration } = require('../controllers/deliverectController');
+const { getBusinessOrganization, appointOrgOwner, leaveOrganization } = require('../controllers/organizationController');
 const printerRoutes = require('./printerRoutes');
 const tableReceiptRoutes = require('./tableReceiptRoutes');
 
@@ -65,6 +66,15 @@ router.patch('/:businessId/status', protect, authorize('super_admin'), setBusine
 router.patch('/:businessId/features', protect, authorize('super_admin', 'business_owner', 'staff'), setBusinessFeatures);
 
 router.delete('/:businessId', protect, authorize('super_admin'), deleteBusiness);
+
+// Self-service organizations - see organizationController.js's
+// "Self-service" section for the full reasoning. Deliberately business-
+// owner-scoped (not super_admin-only like the rest of organizationRoutes.js)
+// since this can only ever create/appoint within the caller's own
+// business, never touch another one.
+router.get('/:businessId/organization', protect, enforceTenant, getBusinessOrganization);
+router.post('/:businessId/organization/owner', protect, enforceTenant, authorize('business_owner', 'super_admin'), appointOrgOwner);
+router.delete('/:businessId/organization', protect, enforceTenant, authorize('business_owner', 'super_admin'), leaveOrganization);
 
 router.use('/:businessId/cards', cardRoutes);
 router.use('/:businessId/analytics', analyticsRoutes);

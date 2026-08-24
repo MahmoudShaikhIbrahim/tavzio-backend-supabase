@@ -83,9 +83,9 @@ const inviteStaff = asyncHandler(async (req, res) => {
 const listStaff = asyncHandler(async (req, res) => {
   const { data, error } = await req.supabase
     .from('profiles')
-    .select('id, name, role, job_role, is_active, last_login_at, created_at, assigned_sections, assigned_outlet_ids, full_access, nav_layout')
+    .select('id, name, role, job_role, is_active, last_login_at, created_at, assigned_sections, assigned_outlet_ids, full_access, nav_layout, organization_id')
     .eq('business_id', req.params.businessId)
-    .in('role', ['staff', 'business_owner']);
+    .in('role', ['staff', 'business_owner', 'org_owner']);
 
   if (error) return res.status(400).json({ message: error.message });
   res.json(data);
@@ -304,6 +304,16 @@ const setMyNavLayout = asyncHandler(async (req, res) => {
 // only, and can't be used to delete yourself or another business_owner
 // account - an owner removing their own access, or one owner removing
 // another, is a business-transfer scenario this button isn't for.
+//
+// org_owner rows are deletable here too, but only self-service ones:
+// the .eq('business_id', ...) below already excludes a super_admin-
+// created, multi-business org_owner (business_id is null for those, by
+// design - see migration 0051/0096) before role is even checked, so
+// this can never reach across a real multi-tenant franchise link.
+// Deleting an org_owner intentionally leaves the organization row and
+// businesses.organization_id link untouched - unwinding the org itself
+// (and anything shared through it - suppliers, POs, published menus) is
+// a separate, explicit decision this button doesn't make on its own.
 const deleteStaff = asyncHandler(async (req, res) => {
   const { data: target } = await req.supabase
     .from('profiles')
@@ -313,7 +323,9 @@ const deleteStaff = asyncHandler(async (req, res) => {
     .maybeSingle();
   if (!target) return res.status(404).json({ message: 'Staff member not found' });
   if (target.id === req.user.id) return res.status(400).json({ message: 'You cannot delete your own account' });
-  if (target.role !== 'staff') return res.status(400).json({ message: 'Only staff accounts can be deleted here' });
+  if (target.role !== 'staff' && target.role !== 'org_owner') {
+    return res.status(400).json({ message: 'Only staff or org owner accounts can be deleted here' });
+  }
 
   await revokeSessionsFor(target.id);
 
@@ -323,7 +335,7 @@ const deleteStaff = asyncHandler(async (req, res) => {
   await logAction({
     businessId: req.params.businessId,
     actor: req.user,
-    action: 'staff_deleted',
+    action: target.role === 'org_owner' ? 'org_owner_deleted' : 'staff_deleted',
     targetId: target.id,
     details: { accountName: target.name },
   });
