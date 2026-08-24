@@ -37,7 +37,7 @@ const tableManagementRoutes = require('./tableManagementRoutes');
 const waitlistRoutes = require('./waitlistRoutes');
 const hotelRoutes = require('./hotelRoutes');
 const { getDeliveryIntegration, upsertDeliveryIntegration } = require('../controllers/deliverectController');
-const { getBusinessOrganization, appointOrgOwner, leaveOrganization } = require('../controllers/organizationController');
+const { getBusinessOrganization, appointOrgOwner, leaveOrganization, setOrgOwnerStatus } = require('../controllers/organizationController');
 const printerRoutes = require('./printerRoutes');
 const tableReceiptRoutes = require('./tableReceiptRoutes');
 
@@ -75,6 +75,7 @@ router.delete('/:businessId', protect, authorize('super_admin'), deleteBusiness)
 router.get('/:businessId/organization', protect, enforceTenant, getBusinessOrganization);
 router.post('/:businessId/organization/owner', protect, enforceTenant, authorize('business_owner', 'super_admin'), appointOrgOwner);
 router.delete('/:businessId/organization', protect, enforceTenant, authorize('business_owner', 'super_admin'), leaveOrganization);
+router.patch('/:businessId/organization/owner/:userId', protect, enforceTenant, authorize('business_owner', 'super_admin'), setOrgOwnerStatus);
 
 router.use('/:businessId/cards', cardRoutes);
 router.use('/:businessId/analytics', analyticsRoutes);

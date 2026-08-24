@@ -16,20 +16,23 @@ const { resendInviteEmail, sendNewInviteEmail, sendMail } = require('../utils/no
 // produced going forward instead of found after the fact.
 //
 // Returns null if unlinking is safe, or a user-facing message if it
-// would leave this organization with zero org_owner accounts anywhere.
-// Deliberately checks ALL org_owners for the org, not just ones homed at
-// this business - an org with a second owner elsewhere loses nothing by
-// this business leaving, so only the true "last owner standing" case is
-// blocked.
+// would leave this organization with zero org owners anywhere - counts
+// BOTH true standalone org_owner accounts (role = 'org_owner', the
+// super-admin cross-business kind) AND self-service org owners
+// (is_org_owner = true on an existing staff/business_owner row - see
+// migration 0098). Deliberately checks every org owner for the org, not
+// just ones homed at this business - an org with a second owner
+// elsewhere loses nothing by this business leaving, so only the true
+// "last owner standing" case is blocked.
 async function checkWouldOrphanOrgOwners(businessId, organizationId) {
   if (!organizationId) return null;
   const { data: owners, error } = await supabaseAdmin
     .from('profiles')
     .select('id, business_id')
     .eq('organization_id', organizationId)
-    .eq('role', 'org_owner');
+    .or('role.eq.org_owner,is_org_owner.eq.true');
   if (error) return null; // fail open on a lookup error - don't block a real unlink over an unrelated read failure
-  if (!owners || owners.length === 0) return null; // no org_owner exists at all yet - nothing to orphan
+  if (!owners || owners.length === 0) return null; // no org owner exists at all yet - nothing to orphan
 
   const remaining = owners.filter((o) => o.business_id !== businessId);
   if (remaining.length === 0) {
@@ -242,12 +245,23 @@ const getBusinessOrganization = asyncHandler(async (req, res) => {
 // actually thinks about this (they're not managing an abstract org
 // shell, they're deciding who runs their multi-location setup).
 //
-// business_id is deliberately set on the resulting profile (see
-// migration 0096) alongside organization_id - purely so this account
-// shows up on and can be deleted from THIS business's Staff page. Every
-// actual org-data route (organizationRoutes.js) still authorizes purely
-// off organization_id via requireOrgOwner, unaffected by business_id
-// being set here.
+// business_id is set on the resulting profile (self-service accounts
+// always have one - they're an existing or new staff/owner account on
+// THIS business) purely so this account shows up on and can be deleted
+// from THIS business's Staff page. Every actual org-data route
+// (organizationRoutes.js) authorizes off organization_id + is_org_owner
+// via requireOrgOwner, unaffected by business_id being set here.
+//
+// Real fix, replacing a real bug: this used to set `role: 'org_owner'`
+// unconditionally - a full overwrite, not an addition. Promoting a
+// staff member silently stripped their `staff` role (and every
+// section/outlet restriction tied to it); promoting the business owner
+// would have stripped `business_owner` entirely, losing every
+// owner-only capability across the app - billing, contracts, deleting
+// staff - the instant they tried to also run the org. Now this sets
+// is_org_owner = true (see migration 0098) and never touches role -
+// same pattern this codebase already uses correctly for full_access:
+// a capability layered on top of the existing role, never a swap.
 const appointOrgOwner = asyncHandler(async (req, res) => {
   const { name, email, staffId, orgName } = req.body;
   if (!staffId && (!name || !email)) {
@@ -278,8 +292,9 @@ const appointOrgOwner = asyncHandler(async (req, res) => {
     if (linkError) return res.status(400).json({ message: linkError.message });
   }
 
-  // Promote an existing team member - no invite email needed, they
-  // already have a working login.
+  // Promote an existing team member (staff OR the business owner
+  // themselves) - no invite email needed, they already have a working
+  // login. role is deliberately absent from this update.
   if (staffId) {
     const { data: staffMember } = await supabaseAdmin
       .from('profiles')
@@ -291,9 +306,9 @@ const appointOrgOwner = asyncHandler(async (req, res) => {
 
     const { data: updated, error } = await supabaseAdmin
       .from('profiles')
-      .update({ role: 'org_owner', organization_id: organizationId })
+      .update({ is_org_owner: true, organization_id: organizationId })
       .eq('id', staffId)
-      .select('id, name, role, organization_id')
+      .select('id, name, role, is_org_owner, organization_id')
       .single();
     if (error) return res.status(400).json({ message: error.message });
 
@@ -311,13 +326,15 @@ const appointOrgOwner = asyncHandler(async (req, res) => {
   // Invite a brand-new person - same real invite-by-email mechanism as
   // inviteStaff/inviteOrgOwner (see notifications.js), same idempotent
   // fallback for a repeat click on someone who never checked their
-  // first email.
+  // first email. Lands as a real `staff` account with is_org_owner set -
+  // they get a normal Team-page presence and dashboard, plus the org
+  // tabs, exactly like a promoted existing staff member would.
   const redirectTo = `${process.env.CLIENT_URL}/admin/login`;
   let created;
   try {
     created = await sendNewInviteEmail({
       email, name, businessLabel: business.name, redirectTo,
-      userMetadata: { name, role: 'org_owner' },
+      userMetadata: { name, role: 'staff' },
     });
   } catch (createError) {
     if (createError.message && createError.message.toLowerCase().includes('already been registered')) {
@@ -327,19 +344,19 @@ const appointOrgOwner = asyncHandler(async (req, res) => {
 
       await supabaseAdmin
         .from('profiles')
-        .update({ business_id: req.params.businessId, organization_id: organizationId, role: 'org_owner' })
+        .update({ business_id: req.params.businessId, organization_id: organizationId, is_org_owner: true })
         .eq('id', existingUser.id);
 
       await resendInviteEmail({ email, name, businessLabel: business.name, redirectTo });
 
-      return res.status(200).json({ id: existingUser.id, name, email, role: 'org_owner', organizationId, resent: true });
+      return res.status(200).json({ id: existingUser.id, name, email, role: 'staff', isOrgOwner: true, organizationId, resent: true });
     }
     return res.status(400).json({ message: createError.message });
   }
 
   const { error: profileError } = await supabaseAdmin
     .from('profiles')
-    .update({ business_id: req.params.businessId, organization_id: organizationId, role: 'org_owner' })
+    .update({ business_id: req.params.businessId, organization_id: organizationId, is_org_owner: true })
     .eq('id', created.id);
   if (profileError) return res.status(400).json({ message: profileError.message });
 
@@ -351,7 +368,70 @@ const appointOrgOwner = asyncHandler(async (req, res) => {
     details: { accountName: name, mode: 'invited' },
   });
 
-  res.status(201).json({ id: created.id, name, email, role: 'org_owner', organizationId });
+  res.status(201).json({ id: created.id, name, email, role: 'staff', isOrgOwner: true, organizationId });
+});
+
+// @route PATCH /api/businesses/:businessId/organization/owner/:userId
+// Body: { isOrgOwner: boolean }
+// Revoke or re-grant org-management capability on an existing team
+// member WITHOUT deleting their account - the real gap the old
+// role-swap design had no answer for: reassigning org ownership used
+// to mean deleting the whole account (losing them as staff/owner too)
+// just to take away the org piece. Same self-and-others reasoning as
+// setStaffFullAccess: an owner can revoke/grant this on anyone on their
+// business, self included. Revoking runs the same orphan check as
+// leaving the org - can't revoke the last org owner without reassigning
+// first, for the same reason you can't unlink the last business.
+const setOrgOwnerStatus = asyncHandler(async (req, res) => {
+  const { isOrgOwner } = req.body;
+  if (typeof isOrgOwner !== 'boolean') {
+    return res.status(400).json({ message: 'isOrgOwner must be true or false' });
+  }
+
+  const { data: target } = await supabaseAdmin
+    .from('profiles')
+    .select('id, name, organization_id')
+    .eq('id', req.params.userId)
+    .eq('business_id', req.params.businessId)
+    .maybeSingle();
+  if (!target) return res.status(404).json({ message: 'Staff member not found' });
+
+  if (!isOrgOwner && target.organization_id) {
+    const orphanMessage = await checkWouldOrphanOrgOwners(req.params.businessId, target.organization_id);
+    // checkWouldOrphanOrgOwners checks per-business, but revoking one
+    // person (not unlinking the whole business) needs a per-person
+    // check - the business itself isn't leaving, so re-derive against
+    // whether any OTHER org owner besides this specific person remains.
+    if (orphanMessage) {
+      const { data: otherOwners } = await supabaseAdmin
+        .from('profiles')
+        .select('id')
+        .eq('organization_id', target.organization_id)
+        .or('role.eq.org_owner,is_org_owner.eq.true')
+        .neq('id', target.id);
+      if (!otherOwners || otherOwners.length === 0) {
+        return res.status(400).json({ message: 'This is the only org owner for this organization - appoint another one first, or every location loses org management.' });
+      }
+    }
+  }
+
+  const { data: updated, error } = await supabaseAdmin
+    .from('profiles')
+    .update({ is_org_owner: isOrgOwner })
+    .eq('id', req.params.userId)
+    .select('id, name, role, is_org_owner')
+    .single();
+  if (error) return res.status(400).json({ message: error.message });
+
+  await logAction({
+    businessId: req.params.businessId,
+    actor: req.user,
+    action: isOrgOwner ? 'org_owner_capability_granted' : 'org_owner_capability_revoked',
+    targetId: updated.id,
+    details: { accountName: updated.name },
+  });
+
+  res.json(updated);
 });
 
 // @route DELETE /api/businesses/:businessId/organization
@@ -404,6 +484,14 @@ const leaveOrganization = asyncHandler(async (req, res) => {
 // behalf of any organization (for support), by passing ?organizationId=
 // explicitly - never inferred, always an explicit query param so it's
 // obvious in any request log which org a super_admin action touched.
+//
+// Two real kinds of org owner now: the standalone kind (role literally
+// 'org_owner', business_id null, created via the super-admin
+// inviteOrgOwner path - spans multiple businesses, no single home) and
+// the self-service kind (role stays business_owner or staff,
+// is_org_owner = true, business_id set - see migration 0098). Both are
+// checked here; req.user already carries is_org_owner from the profile
+// select in the auth middleware.
 function requireOrgOwner(req, res, next) {
   if (req.user.role === 'super_admin') {
     const orgId = req.query.organizationId || req.body.organizationId;
@@ -411,7 +499,9 @@ function requireOrgOwner(req, res, next) {
     req.orgId = orgId;
     return next();
   }
-  if (req.user.role !== 'org_owner' || !req.user.organization_id) {
+  const isStandaloneOrgOwner = req.user.role === 'org_owner' && !!req.user.organization_id;
+  const isSelfServiceOrgOwner = (req.user.role === 'business_owner' || req.user.role === 'staff') && req.user.is_org_owner && !!req.user.organization_id;
+  if (!isStandaloneOrgOwner && !isSelfServiceOrgOwner) {
     return res.status(403).json({ message: 'Forbidden: org_owner access required' });
   }
   req.orgId = req.user.organization_id;
@@ -850,7 +940,7 @@ const createOrgPurchaseOrder = asyncHandler(async (req, res) => {
 
 module.exports = {
   listOrganizations, createOrganization, deleteOrganization, setBusinessOrganization, inviteOrgOwner,
-  getBusinessOrganization, appointOrgOwner, leaveOrganization,
+  getBusinessOrganization, appointOrgOwner, leaveOrganization, setOrgOwnerStatus,
   requireOrgOwner, getMyOrganization,
   listOrgMenuCategories, createOrgMenuCategory, createOrgMenuItem, updateOrgMenuItem, deleteOrgMenuItem,
   publishMenuToLocations, getConsolidatedReport, getHotelConsolidatedReport,
