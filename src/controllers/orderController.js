@@ -382,10 +382,16 @@ const placeStaffOrder = asyncHandler(async (req, res) => {
 // unpaid and gets settled later), a POS order is paid the moment it's
 // created - the staff member is standing at the counter collecting the
 // money in the same motion as ringing it up.
+const ORDER_TYPE_LABELS = { dine_in: 'Dine-in', walk_in: 'Walk-in', pickup: 'Pickup', delivery: 'Delivery' };
+
 const createPosOrder = asyncHandler(async (req, res) => {
-  const { tableLabel = 'Walk-in', items, note = '', paymentMethod, chargeToFolioId, discountType, discountValue, discountReason } = req.body;
+  const { orderType = 'walk_in', items, note = '', paymentMethod, chargeToFolioId, discountType, discountValue, discountReason } = req.body;
+  let { tableLabel } = req.body;
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ message: 'At least one item is required' });
+  }
+  if (!Object.keys(ORDER_TYPE_LABELS).includes(orderType)) {
+    return res.status(400).json({ message: 'orderType must be dine_in, walk_in, pickup, or delivery' });
   }
   if (discountType && !['percentage', 'fixed'].includes(discountType)) {
     return res.status(400).json({ message: 'discountType must be percentage or fixed' });
@@ -407,6 +413,24 @@ const createPosOrder = asyncHandler(async (req, res) => {
     const { data: folio } = await req.supabase.from('hotel_folios').select('status').eq('id', chargeToFolioId).eq('business_id', req.params.businessId).single();
     if (!folio) return res.status(404).json({ message: 'Folio not found' });
     if (folio.status === 'closed') return res.status(400).json({ message: 'This folio is closed - cannot charge to it' });
+  }
+
+  // Real fix for the grouping-collision bug: if the client left the
+  // label blank (the normal case for walk-in/pickup/delivery - there's
+  // no real table number to type), auto-number it server-side against
+  // today's actual count for this exact type+business, so two orders
+  // never land on the identical label - and this stays correct even
+  // with several POS terminals ringing up orders on the same business
+  // at the same time, which a client-side counter could never guarantee.
+  if (!tableLabel || !tableLabel.trim()) {
+    const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
+    const { count } = await req.supabase
+      .from('orders')
+      .select('id', { count: 'exact', head: true })
+      .eq('business_id', req.params.businessId)
+      .eq('order_type', orderType)
+      .gte('created_at', startOfDay.toISOString());
+    tableLabel = `${ORDER_TYPE_LABELS[orderType]} #${(count || 0) + 1}`;
   }
 
   const { data: business } = await req.supabase.from('businesses').select('features, category').eq('id', req.params.businessId).single();
@@ -512,6 +536,7 @@ const createPosOrder = asyncHandler(async (req, res) => {
       business_id: req.params.businessId,
       card_id: null,
       table_label: tableLabel,
+      order_type: orderType,
       note,
       total,
       status: 'pending',
