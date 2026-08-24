@@ -135,18 +135,9 @@ const createPublicBooking = asyncHandler(async (req, res) => {
   const bookingConfig = business.features?.onlineBooking || {};
   if (!bookingConfig.enabled) return res.status(404).json({ message: 'Online booking is not available for this business' });
 
-  const { data: verified } = await supabaseAdmin
-    .from('booking_otp_codes')
-    .select('id')
-    .eq('business_id', business.id)
-    .eq('phone', phone)
-    .not('verified_at', 'is', null)
-    .gte('verified_at', new Date(Date.now() - VERIFIED_WINDOW_MINUTES * 60000).toISOString())
-    .order('verified_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (!verified) return res.status(400).json({ message: 'Verify your phone number first' });
-
+  if (!(await requireVerifiedPhone(business.id, phone))) {
+    return res.status(400).json({ message: 'Verify your phone number first' });
+  }
   // Real customer profile, not just a phone string sitting on this one
   // booking row - same find-or-create-by-phone pattern already used by
   // the NFC loyalty check-in flow (publicController.js), so a guest who
@@ -384,6 +375,103 @@ async function reconcilePendingBookingPayments() {
   }
 }
 
+// Shared by createPublicBooking, listMyBookings, and
+// reschedulePublicBooking - all three need the exact same proof: a
+// phone verified at this business within the last
+// VERIFIED_WINDOW_MINUTES. Centralized here after this became the
+// third copy of the same five-line check.
+async function requireVerifiedPhone(businessId, phone) {
+  const { data: verified } = await supabaseAdmin
+    .from('booking_otp_codes')
+    .select('id')
+    .eq('business_id', businessId)
+    .eq('phone', phone)
+    .not('verified_at', 'is', null)
+    .gte('verified_at', new Date(Date.now() - VERIFIED_WINDOW_MINUTES * 60000).toISOString())
+    .order('verified_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return !!verified;
+}
+
+// @route GET /api/public/business/:slug/my-bookings?phone=
+// The "manage an existing booking" entry point - same OTP trust model
+// as everything else here (see requireVerifiedPhone), just reading
+// instead of writing. Only ever returns this business's own bookings
+// for this phone, never anything from another business - the whole
+// point of scoping by business_id, not just phone.
+const listMyBookings = asyncHandler(async (req, res) => {
+  const { phone } = req.query;
+  if (!phone) return res.status(400).json({ message: 'phone is required' });
+
+  const { data: business } = await supabaseAdmin.from('businesses').select('id').eq('slug', req.params.slug).eq('status', 'active').maybeSingle();
+  if (!business) return res.status(404).json({ message: 'Business not found' });
+
+  if (!(await requireVerifiedPhone(business.id, phone))) {
+    return res.status(400).json({ message: 'Verify your phone number first' });
+  }
+
+  const { data: bookings, error } = await supabaseAdmin
+    .from('bookings')
+    .select('id, guest_name, party_size, requested_at, note, status, down_payment_status')
+    .eq('business_id', business.id)
+    .eq('contact_phone', phone)
+    .in('status', ['pending', 'confirmed'])
+    .order('requested_at', { ascending: true });
+  if (error) return res.status(400).json({ message: error.message });
+
+  res.json(bookings || []);
+});
+
+// @route PATCH /api/public/bookings/:bookingId/reschedule
+// Body: { phone, requestedAt, partySize? }
+// Same phone-match authorization as cancelPublicBooking below - the
+// only credential this flow has. A reschedule doesn't touch a food
+// pre-order or a down payment already taken; it only moves the table
+// reservation itself. If this business requires down payments,
+// deliberately not re-validating that here - the guest already paid
+// for THIS booking, and moving its time doesn't un-pay it.
+const reschedulePublicBooking = asyncHandler(async (req, res) => {
+  const { phone, requestedAt, partySize } = req.body;
+  if (!phone || !requestedAt) return res.status(400).json({ message: 'phone and requestedAt are required' });
+
+  const { data: booking } = await supabaseAdmin
+    .from('bookings')
+    .select('id, business_id, status, contact_phone')
+    .eq('id', req.params.bookingId)
+    .maybeSingle();
+  if (!booking || booking.contact_phone !== phone) {
+    return res.status(404).json({ message: 'Booking not found' });
+  }
+  if (!['pending', 'confirmed'].includes(booking.status)) {
+    return res.status(400).json({ message: 'This booking can no longer be rescheduled' });
+  }
+  if (!(await requireVerifiedPhone(booking.business_id, phone))) {
+    return res.status(400).json({ message: 'Verify your phone number first' });
+  }
+
+  const patch = { requested_at: requestedAt };
+  if (partySize) patch.party_size = partySize;
+
+  const { data: updated, error } = await supabaseAdmin
+    .from('bookings')
+    .update(patch)
+    .eq('id', booking.id)
+    .select()
+    .single();
+  if (error) return res.status(400).json({ message: error.message });
+
+  await logAction({
+    businessId: booking.business_id,
+    actor: null,
+    action: 'booking_rescheduled_by_customer',
+    targetId: booking.id,
+    details: { requestedAt, partySize: partySize || null },
+  });
+
+  res.json(updated);
+});
+
 // @route POST /api/public/bookings/:bookingId/cancel
 // Body: { phone }
 // The only "credential" a guest ever has in this whole flow is their
@@ -430,6 +518,7 @@ const cancelPublicBooking = asyncHandler(async (req, res) => {
 
 module.exports = {
   getBookingConfig, requestBookingOtp, verifyBookingOtp, createPublicBooking,
-  getBookingPaymentStatus, getBookingArrival, confirmArrivalByCustomer, cancelPublicBooking,
+  getBookingPaymentStatus, getBookingArrival, confirmArrivalByCustomer,
+  cancelPublicBooking, listMyBookings, reschedulePublicBooking,
   reconcilePendingBookingPayments,
 };
