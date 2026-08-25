@@ -1,4 +1,6 @@
 const asyncHandler = require('../utils/asyncHandler');
+const { supabaseAdmin } = require('../config/supabaseClient');
+const { sendSupplierOrderEmail } = require('../utils/notifications');
 
 // --- Suppliers ---
 const listSuppliers = asyncHandler(async (req, res) => {
@@ -464,8 +466,54 @@ const createPurchaseOrder = asyncHandler(async (req, res) => {
   const { error: itemsError } = await req.supabase.from('purchase_order_items').insert(rows);
   if (itemsError) return res.status(400).json({ message: itemsError.message });
 
+  // Real fix for a confirmed gap: placing an order used to only ever
+  // write these two database rows - the supplier never actually heard
+  // about it. Fire-and-forget, same discipline as every other
+  // notification in this codebase - a slow or failed email should
+  // never hold up or fail the actual order creation, which already
+  // succeeded by this point regardless.
+  if (supplierId) {
+    sendSupplierOrderNotification({ businessId: req.params.businessId, supplierId, po, items }).catch((err) => {
+      console.error('Supplier order email failed:', err.message);
+    });
+  }
+
   res.status(201).json(po);
 });
+
+// Gathers everything the email actually needs (ingredient names aren't
+// known from the raw request body, only ingredientId) and sends it -
+// kept separate from the main handler so that one stays focused on the
+// real database work, this one on assembling and sending the notice.
+async function sendSupplierOrderNotification({ businessId, supplierId, po, items }) {
+  const { data: supplier } = await supabaseAdmin.from('suppliers').select('name, email').eq('id', supplierId).eq('business_id', businessId).maybeSingle();
+  if (!supplier?.email) return; // no email on file for this supplier - nothing to send
+
+  const { data: business } = await supabaseAdmin.from('businesses').select('name, owner').eq('id', businessId).single();
+  const { data: ingredients } = await supabaseAdmin.from('ingredients').select('id, name, unit').in('id', items.map((i) => i.ingredientId));
+  const ingredientsById = Object.fromEntries((ingredients || []).map((i) => [i.id, i]));
+
+  let businessEmail;
+  if (business?.owner) {
+    const { data: ownerUser } = await supabaseAdmin.auth.admin.getUserById(business.owner);
+    businessEmail = ownerUser?.user?.email;
+  }
+
+  await sendSupplierOrderEmail({
+    supplierEmail: supplier.email,
+    supplierName: supplier.name,
+    businessName: business?.name || 'A Tavzio business',
+    businessEmail,
+    poNumber: po.id.slice(0, 8).toUpperCase(),
+    items: items.map((i) => ({
+      name: ingredientsById[i.ingredientId]?.name || 'Item',
+      unit: ingredientsById[i.ingredientId]?.unit || '',
+      quantity: Number(i.quantity),
+      unitCostAed: Number(i.unitCostAed) || 0,
+    })),
+    totalAed: Number(po.total_cost_aed) || 0,
+  });
+}
 
 // Marking a PO received is what actually moves stock - creating the PO
 // alone doesn't touch inventory, since the goods haven't arrived yet.

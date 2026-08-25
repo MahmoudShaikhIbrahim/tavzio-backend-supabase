@@ -55,7 +55,7 @@ function base64url(str) {
 
 // Fire-and-forget by design — a notification failing to send should never
 // block or slow down the actual login. Errors are logged, not thrown.
-async function sendMail({ to, subject, text }) {
+async function sendMail({ to, subject, text, replyTo }) {
   const from = process.env.ALERT_FROM_EMAIL;
   const accessToken = await getAccessToken();
   if (!accessToken || !from) {
@@ -65,11 +65,11 @@ async function sendMail({ to, subject, text }) {
   try {
     // A real RFC 2822 message, hand-built - the Gmail API takes a raw
     // MIME message rather than separate from/to/subject/body fields.
-    const replyTo = process.env.REPLY_TO_EMAIL || from;
+    const resolvedReplyTo = replyTo || process.env.REPLY_TO_EMAIL || from;
     const rawMessage = [
       `From: ${from}`,
       `To: ${to}`,
-      `Reply-To: ${replyTo}`,
+      `Reply-To: ${resolvedReplyTo}`,
       `Subject: ${subject}`,
       'MIME-Version: 1.0',
       'Content-Type: text/plain; charset="UTF-8"',
@@ -109,6 +109,38 @@ function sendDeviceConfirmation({ email, confirmUrl, businessName }) {
     from: RESEND_SECURITY_FROM,
     subject: `Confirm this device for your Tavzio dashboard`,
     text: `Someone tapped your admin card on a device we haven't seen before for ${businessName}. If this was you, open this link on that SAME device to finish logging in: ${confirmUrl}\n\nThis link expires in 10 minutes. If this wasn't you, ignore this email and consider disabling the card.`,
+  });
+}
+
+// Real fix for a confirmed gap: placing a purchase order used to only
+// ever write a database row - no actual communication to the supplier
+// ever happened, leaving "place an order" a purely internal record with
+// no real-world effect. replyTo is the business's own account email
+// (the only real contact email on file for a business - there's no
+// separate business contact-email field), so the supplier's reply goes
+// straight to the business, not to Tavzio's generic inbox.
+function sendSupplierOrderEmail({ supplierEmail, supplierName, businessName, businessEmail, poNumber, items, totalAed, notes }) {
+  const lines = items.map((i) => `  - ${i.quantity} ${i.unit} × ${i.name}${i.unitCostAed ? ` @ AED ${i.unitCostAed.toFixed(2)} each` : ''}`);
+  const text = [
+    `Hi${supplierName ? ` ${supplierName}` : ''},`,
+    '',
+    `${businessName} would like to place the following order${poNumber ? ` (PO ${poNumber})` : ''}:`,
+    '',
+    ...lines,
+    '',
+    totalAed ? `Estimated total: AED ${totalAed.toFixed(2)}` : '',
+    notes ? `Note from ${businessName}: ${notes}` : '',
+    '',
+    `Please reply to this email to confirm availability and delivery timing.`,
+    '',
+    `- ${businessName} (sent via Tavzio)`,
+  ].filter(Boolean).join('\n');
+
+  return sendMail({
+    to: supplierEmail,
+    subject: `New order from ${businessName}${poNumber ? ` - PO ${poNumber}` : ''}`,
+    text,
+    replyTo: businessEmail || undefined,
   });
 }
 
@@ -301,7 +333,7 @@ async function sendCampaignEmail({ to, subject, text }) {
 }
 
 module.exports = {
-  notifyCardUsed, sendDeviceConfirmation, sendMail,
+  notifyCardUsed, sendDeviceConfirmation, sendMail, sendSupplierOrderEmail,
   sendContractSignLink, sendSignedContractCopy, sendContractSignedReceipt, sendPaymentFailedWarning, sendAccountSuspended, sendContractTerminated,
   sendNewInviteEmail, resendInviteEmail, sendCampaignEmail,
 };

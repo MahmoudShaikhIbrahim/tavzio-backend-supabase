@@ -555,6 +555,35 @@ const signPublicContract = asyncHandler(async (req, res) => {
   res.json({ contract: updated, checkoutUrl: checkout.success ? checkout.checkoutUrl : null, checkoutError: checkout.success ? null : checkout.error });
 });
 
+// @route POST /api/public/contracts/:token/resume-checkout
+// The real fix for "signed but abandoned the Stripe page, then came
+// back to the same link later" - regenerates a fresh Checkout Session
+// for a contract that's genuinely signed but not yet paid, so the
+// frontend can redirect there automatically on load rather than
+// leaving the person stuck looking at a "Signed" confirmation with no
+// way to actually finish. Deliberately only for status === 'signed'
+// exactly - an already-paid/active contract has no legitimate reason
+// to regenerate a new subscription checkout session at all.
+const resumeContractCheckout = asyncHandler(async (req, res) => {
+  const { data: contract } = await supabaseAdmin.from('contracts').select('*').eq('sign_token', req.params.token).maybeSingle();
+  if (!contract) return res.status(404).json({ message: 'This link is invalid or has expired' });
+  if (contract.status !== 'signed') {
+    return res.status(400).json({ message: 'This contract is not awaiting payment' });
+  }
+
+  const business = await resolveContractParty(contract);
+  const appUrl = primaryClientUrl();
+  const checkout = await createSubscriptionCheckoutSession({
+    contract,
+    business,
+    successUrl: `${appUrl}/sign/${req.params.token}?activated=1`,
+    cancelUrl: `${appUrl}/sign/${req.params.token}`,
+  });
+
+  if (!checkout.success) return res.status(400).json({ message: checkout.error });
+  res.json({ checkoutUrl: checkout.checkoutUrl });
+});
+
 // @route POST /api/businesses/:businessId/contracts/:contractId/sign  (business_owner only)
 // Body: { fullName }
 // The authenticated-dashboard equivalent of the public flow above - for
@@ -630,6 +659,12 @@ const downloadContractPdf = asyncHandler(async (req, res) => {
   const { data: branding } = await req.supabase.from('receipt_branding').select('*').limit(1).maybeSingle();
 
   const isSigned = ['signed', 'paid', 'active'].includes(contract.status);
+  // Deliberately narrower than isSigned - a client who has signed but
+  // not yet paid is a real, valid intermediate state (see the signing
+  // page's own redirect-to-Stripe-on-return logic), and Tavzio's own
+  // signature/stamp must never appear until money has actually changed
+  // hands, not just at the moment the client typed their name.
+  const isPaid = ['paid', 'active'].includes(contract.status);
   const text = isSigned && contract.signed_snapshot_text ? contract.signed_snapshot_text : buildContractText(contract, business, branding);
   const legalName = branding?.legal_name || 'Tavzio';
   const brass = '#b8925a';
@@ -676,15 +711,15 @@ const downloadContractPdf = asyncHandler(async (req, res) => {
     );
   }
 
-  // Stamp and signature images - only for a genuinely signed contract,
-  // same real fix as the text block above and for the same reason: an
-  // unsigned draft going out to a client should never carry the actual
-  // signature/stamp images at all. Previously these rendered
-  // unconditionally regardless of status - a client could see (and
-  // potentially extract) the owner's real signature and company stamp
-  // before ever signing or paying anything. Fixed placement - same
-  // convention as receipts.
-  if (isSigned) {
+  // Stamp and signature images - THIS is Tavzio's own countersignature,
+  // deliberately gated on isPaid, not isSigned. A client who signed but
+  // never paid must never see Tavzio's real signature/stamp on a PDF -
+  // the client's own signature above is a true, valid record of what
+  // they did regardless of payment, but Tavzio's side of this contract
+  // is never actually complete until money has changed hands. Same
+  // resilience convention as the rest of this function - a broken image
+  // URL should never break the whole PDF.
+  if (isPaid) {
     const stampY = Math.min(doc.y + 30, 700);
     if (branding?.signature_url) {
       try {
@@ -829,7 +864,7 @@ const deleteContract = asyncHandler(async (req, res) => {
 
 module.exports = {
   createContract, sendContract, listContracts, previewContract, signContract, downloadContractPdf, downloadPublicContractPdf,
-  getPublicContractByToken, signPublicContract,
+  getPublicContractByToken, signPublicContract, resumeContractCheckout,
   createStandaloneContract, listAllContracts, onboardContract, previewStandaloneContract,
   terminateContract, deleteContract,
   buildContractText, periodsPerYear,
