@@ -21,6 +21,39 @@ const createSupplier = asyncHandler(async (req, res) => {
   res.status(201).json(data);
 });
 
+// Real fix for a confirmed gap: no way to update or delete a supplier
+// at all, only create - mirrors the exact same pattern already used
+// for the org-level equivalent (updateOrgSupplier/deleteOrgSupplier).
+const updateSupplier = asyncHandler(async (req, res) => {
+  const { name, contactName, phone, email } = req.body;
+  const update = {};
+  if (name !== undefined) update.name = name;
+  if (contactName !== undefined) update.contact_name = contactName;
+  if (phone !== undefined) update.phone = phone;
+  if (email !== undefined) update.email = email;
+
+  const { data, error } = await req.supabase
+    .from('suppliers')
+    .update(update)
+    .eq('id', req.params.supplierId)
+    .eq('business_id', req.params.businessId)
+    .select()
+    .single();
+  if (error || !data) return res.status(404).json({ message: 'Supplier not found' });
+  res.json(data);
+});
+
+const deleteSupplier = asyncHandler(async (req, res) => {
+  const { error, count } = await req.supabase
+    .from('suppliers')
+    .delete({ count: 'exact' })
+    .eq('id', req.params.supplierId)
+    .eq('business_id', req.params.businessId);
+  if (error) return res.status(400).json({ message: error.message });
+  if (!count) return res.status(404).json({ message: 'Supplier not found' });
+  res.json({ message: 'Deleted' });
+});
+
 // --- Ingredients ---
 const listIngredients = asyncHandler(async (req, res) => {
   const { data, error } = await req.supabase.from('ingredients').select('*, suppliers(name)').eq('business_id', req.params.businessId).order('name');
@@ -587,7 +620,7 @@ const receivePurchaseOrder = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  listSuppliers, createSupplier,
+  listSuppliers, createSupplier, updateSupplier, deleteSupplier,
   listIngredients, createIngredient, updateIngredient, deleteIngredient, adjustStock,
   recordWaste, getWasteReport, getLowStock, getValuation,
   getMenuItemFoodCost, getActualFoodCost,

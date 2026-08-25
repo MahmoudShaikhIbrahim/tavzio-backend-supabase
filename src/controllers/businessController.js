@@ -1,4 +1,5 @@
 const asyncHandler = require('../utils/asyncHandler');
+const { supabaseAdmin } = require('../config/supabaseClient');
 const { translateToAllLanguages } = require('../utils/translate');
 
 // @route GET /api/businesses/:businessId
@@ -99,6 +100,8 @@ const updateBusiness = asyncHandler(async (req, res) => {
 });
 
 // @route GET /api/businesses  (super_admin only — RLS returns all rows for that role)
+const { computeNextBillingDate, EXPIRY_WARNING_DAYS } = require('../utils/contractBillingCheck');
+
 const listBusinesses = asyncHandler(async (req, res) => {
   const { status, search, page = 1, limit = 20 } = req.query;
   let query = req.supabase.from('businesses').select('*', { count: 'exact' });
@@ -113,7 +116,41 @@ const listBusinesses = asyncHandler(async (req, res) => {
   const { data, error, count } = await query;
   if (error) return res.status(400).json({ message: error.message });
 
-  res.json({ businesses: data, total: count, page: Number(page), pages: Math.ceil(count / limit) });
+  // Real countdown data for the super-admin billing view - same
+  // computation the daily notification check itself uses (see
+  // contractBillingCheck.js), so what the UI shows and what actually
+  // triggers a notification can never quietly disagree with each other.
+  const businessIds = data.map((b) => b.id);
+  let contractsById = {};
+  if (businessIds.length > 0) {
+    const { data: contracts } = await supabaseAdmin
+      .from('contracts')
+      .select('business_id, contract_number, payment_frequency, start_date, end_date, status')
+      .in('business_id', businessIds)
+      .in('status', ['active', 'paid'])
+      .order('created_at', { ascending: false });
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    for (const c of contracts || []) {
+      if (contractsById[c.business_id]) continue; // most recent only, per business
+      const nextBilling = computeNextBillingDate(c, today);
+      const daysToBilling = Math.round((nextBilling.getTime() - today.getTime()) / 86400000);
+      const endDate = new Date(`${c.end_date}T00:00:00Z`);
+      const daysToExpiry = Math.round((endDate.getTime() - today.getTime()) / 86400000);
+      contractsById[c.business_id] = {
+        contractNumber: c.contract_number,
+        paymentFrequency: c.payment_frequency,
+        nextBillingDate: nextBilling.toISOString().slice(0, 10),
+        daysToBilling,
+        endDate: c.end_date,
+        daysToExpiry,
+        expiryWarningDays: EXPIRY_WARNING_DAYS[c.payment_frequency] || 30,
+      };
+    }
+  }
+
+  const businesses = data.map((b) => ({ ...b, contractCountdown: contractsById[b.id] || null }));
+  res.json({ businesses, total: count, page: Number(page), pages: Math.ceil(count / limit) });
 });
 
 // @route PATCH /api/businesses/:businessId/status  (super_admin only)

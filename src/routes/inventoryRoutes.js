@@ -1,6 +1,6 @@
 const express = require('express');
 const {
-  listSuppliers, createSupplier,
+  listSuppliers, createSupplier, updateSupplier, deleteSupplier,
   listIngredients, createIngredient, updateIngredient, deleteIngredient, adjustStock,
   recordWaste, getWasteReport, getLowStock, getValuation,
   getMenuItemFoodCost, getActualFoodCost,
@@ -15,6 +15,8 @@ router.use(protect, enforceTenant);
 
 router.get('/suppliers', listSuppliers);
 router.post('/suppliers', createSupplier);
+router.patch('/suppliers/:supplierId', updateSupplier);
+router.delete('/suppliers/:supplierId', deleteSupplier);
 
 router.get('/ingredients', listIngredients);
 router.post('/ingredients', createIngredient);

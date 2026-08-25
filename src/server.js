@@ -100,8 +100,19 @@ app.listen(PORT, () => console.log(`Tavzio API (Supabase) running on port ${PORT
 // hosted gateway page never made sense for a staff-operated counter.
 const { reconcilePendingBillPayments, reconcilePendingOrderPayments } = require('./controllers/publicController');
 const { reconcilePendingBookingPayments } = require('./controllers/bookingPublicController');
+const { checkContractBillingAndExpiryNotifications } = require('./utils/contractBillingCheck');
 setInterval(() => {
   reconcilePendingBillPayments().catch((err) => console.error('Bill payment reconciliation run failed:', err.message));
   reconcilePendingOrderPayments().catch((err) => console.error('Order payment reconciliation run failed:', err.message));
   reconcilePendingBookingPayments().catch((err) => console.error('Booking payment reconciliation run failed:', err.message));
 }, 2 * 60 * 1000);
+
+// Real, once-a-day check for upcoming contract billing and expiry -
+// a day-level countdown doesn't need minute-level polling like the
+// payment reconciliation jobs above. Also runs once immediately on
+// startup, so a freshly-deployed server doesn't wait a full day before
+// its first real check.
+setInterval(() => {
+  checkContractBillingAndExpiryNotifications().catch((err) => console.error('Contract billing/expiry check failed:', err.message));
+}, 24 * 60 * 60 * 1000);
+checkContractBillingAndExpiryNotifications().catch((err) => console.error('Contract billing/expiry check failed:', err.message));
