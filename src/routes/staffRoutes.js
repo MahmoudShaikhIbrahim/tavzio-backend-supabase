@@ -1,5 +1,6 @@
 const express = require('express');
 const { inviteStaff, resendStaffInvite, listStaff, setStaffActive, deleteStaff, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, listRolePermissions, resetPassword } = require('../controllers/staffController');
+const { clearStaffPin } = require('../controllers/pinController');
 const { issueAdminCard } = require('../controllers/cardController');
 const { protect, authorize, enforceTenant } = require('../middleware/auth');
 
@@ -41,6 +42,9 @@ router.patch('/:userId/nav-layout', setMyNavLayout);
 // (including the owner's own, if truly locked out and unable to reach
 // the normal Change Password flow in Settings).
 router.post('/:userId/reset-password', authorize('business_owner', 'super_admin'), resetPassword);
+// Same "owner unlocks a locked-out staff member" pattern as reset-password
+// above - clears (never sets a known replacement) a forgotten POS PIN.
+router.delete('/:userId/pin', authorize('business_owner', 'super_admin'), clearStaffPin);
 router.post('/:userId/resend-invite', authorize('business_owner', 'super_admin'), resendStaffInvite);
 router.get('/role-permissions', listRolePermissions);
 // Only you issue/reissue admin cards — matches how the physical NFC chips

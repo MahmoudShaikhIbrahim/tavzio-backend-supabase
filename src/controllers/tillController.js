@@ -73,6 +73,59 @@ const getMyOpenTill = asyncHandler(async (req, res) => {
 // recorded exactly as found - there's no "adjust to match" option here,
 // on purpose, since papering over a shortfall defeats the entire point
 // of reconciliation.
+// @route GET /api/businesses/:businessId/till/:tillId/x-report
+// The real gap this closes: closeTill (below) is a Z-report - it always
+// closes and finalizes the session. Until now there was no way to see
+// where a till actually stands mid-shift without ending it. This is
+// read-only, start to finish - no update, no insert, callable as many
+// times as useful during a shift.
+const getXReport = asyncHandler(async (req, res) => {
+  const { data: till } = await req.supabase
+    .from('till_sessions')
+    .select('*')
+    .eq('id', req.params.tillId)
+    .eq('business_id', req.params.businessId)
+    .single();
+  if (!till) return res.status(404).json({ message: 'Till session not found' });
+  if (till.staff_id !== req.user.id && req.user.role !== 'business_owner' && req.user.role !== 'super_admin') {
+    return res.status(403).json({ message: 'Only the staff member who opened this till (or an owner) can view its report' });
+  }
+
+  // Same real query closeTill uses for cash - see that function's own
+  // comment for why this reads from payments (tied to whichever till
+  // was open when the cash was actually collected) rather than orders.
+  const { data: cashPayments } = await req.supabase
+    .from('payments')
+    .select('amount')
+    .eq('till_session_id', till.id)
+    .eq('status', 'completed')
+    .ilike('provider', '%cash%');
+  const cashSalesTotal = (cashPayments || []).reduce((sum, p) => sum + Number(p.amount), 0);
+
+  // Card doesn't touch the till physically, but a real X-report shows
+  // every tender total for the shift, not just the one that needs
+  // physical reconciliation - a manager glancing at this wants the
+  // whole sales picture, not just the drawer math.
+  const { data: cardPayments } = await req.supabase
+    .from('payments')
+    .select('amount')
+    .eq('till_session_id', till.id)
+    .eq('status', 'completed')
+    .ilike('provider', '%card%');
+  const cardSalesTotal = (cardPayments || []).reduce((sum, p) => sum + Number(p.amount), 0);
+
+  res.json({
+    tillId: till.id,
+    staffId: till.staff_id,
+    openedAt: till.opened_at,
+    openingFloatAed: Number(till.opening_float_aed),
+    cashSalesTotal,
+    cardSalesTotal,
+    expectedCashAed: Number(till.opening_float_aed) + cashSalesTotal,
+    generatedAt: new Date().toISOString(),
+  });
+});
+
 const closeTill = asyncHandler(async (req, res) => {
   const { countedCashAed, notes = '' } = req.body;
   if (countedCashAed == null) return res.status(400).json({ message: 'countedCashAed is required' });
@@ -89,14 +142,22 @@ const closeTill = asyncHandler(async (req, res) => {
     return res.status(403).json({ message: 'Only the staff member who opened this till (or an owner) can close it' });
   }
 
-  const { data: cashOrders } = await req.supabase
-    .from('orders')
-    .select('total')
+  // Real fix, consequence of Send to Kitchen and Payment being separate
+  // actions/moments now: this used to sum orders.total where
+  // orders.till_session_id + orders.payment_method matched, which only
+  // worked when payment was always chosen at order-creation time. Now
+  // it sums real payments.amount for cash tenders actually recorded
+  // during this till session - correct regardless of when the order
+  // that cash belongs to was originally created, or whether it was a
+  // different staff member's shift that rang it up.
+  const { data: cashPayments } = await req.supabase
+    .from('payments')
+    .select('amount')
     .eq('till_session_id', till.id)
-    .eq('payment_method', 'cash')
-    .neq('status', 'cancelled');
+    .eq('status', 'completed')
+    .ilike('provider', '%cash%');
 
-  const cashSalesTotal = (cashOrders || []).reduce((sum, o) => sum + Number(o.total), 0);
+  const cashSalesTotal = (cashPayments || []).reduce((sum, p) => sum + Number(p.amount), 0);
   const expectedCash = Number(till.opening_float_aed) + cashSalesTotal;
   const variance = Number(countedCashAed) - expectedCash;
 
@@ -131,4 +192,4 @@ const listTillSessions = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
-module.exports = { openTill, getMyOpenTill, closeTill, listTillSessions };
+module.exports = { openTill, getMyOpenTill, closeTill, listTillSessions, getXReport };

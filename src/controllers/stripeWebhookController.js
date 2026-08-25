@@ -1,8 +1,8 @@
 const asyncHandler = require('../utils/asyncHandler');
 const { supabaseAdmin } = require('../config/supabaseClient');
 const { constructWebhookEvent } = require('../utils/stripeAdapter');
-const { sendContractSignedReceipt, sendPaymentFailedWarning, sendAccountSuspended } = require('../utils/notifications');
-const { primaryClientUrl } = require('../utils/clientUrl');
+const { sendContractSignedReceipt, sendSignedContractCopy, sendPaymentFailedWarning, sendAccountSuspended } = require('../utils/notifications');
+const { primaryClientUrl, primaryApiUrl } = require('../utils/clientUrl');
 
 async function nextReceiptNumber() {
   const year = new Date().getFullYear();
@@ -41,7 +41,7 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
       const session = event.data.object;
       const contractId = session.metadata?.contractId;
       if (contractId) {
-        const { data: existing } = await supabaseAdmin.from('contracts').select('business_id').eq('id', contractId).maybeSingle();
+        const { data: existing } = await supabaseAdmin.from('contracts').select('*').eq('id', contractId).maybeSingle();
         // A contract already linked to a business (the old/renewal path)
         // can go straight to 'active' - the business already exists. A
         // standalone contract stops at 'paid': onboarding is the only
@@ -54,6 +54,33 @@ const handleStripeWebhook = asyncHandler(async (req, res) => {
             stripe_subscription_id: session.subscription,
           })
           .eq('id', contractId);
+
+        // Real close of the sign-then-pay flow: the client's own
+        // countersigned copy, sent the moment payment is actually
+        // confirmed - not at signing alone, which doesn't guarantee the
+        // payment step that follows it succeeds. A standalone contract
+        // (no business_id yet) sends to client_email; an existing
+        // business's renewal sends to its owner, same email-resolution
+        // logic sendContract already uses to send the original link.
+        if (existing) {
+          let recipientEmail = existing.client_email;
+          if (existing.business_id) {
+            const { data: biz } = await supabaseAdmin.from('businesses').select('owner').eq('id', existing.business_id).maybeSingle();
+            if (biz?.owner) {
+              const { data: ownerUser } = await supabaseAdmin.auth.admin.getUserById(biz.owner);
+              recipientEmail = ownerUser?.user?.email || recipientEmail;
+            }
+          }
+          const apiUrl = primaryApiUrl();
+          if (recipientEmail && apiUrl) {
+            sendSignedContractCopy({
+              email: recipientEmail,
+              businessName: existing.client_business_name || 'your business',
+              contractNumber: existing.contract_number,
+              pdfUrl: `${apiUrl}/api/public/contracts/${existing.sign_token}/pdf`,
+            }).catch((err) => console.error('Signed contract email failed:', err.message));
+          }
+        }
       }
       break;
     }

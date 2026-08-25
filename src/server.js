@@ -92,15 +92,16 @@ app.listen(PORT, () => console.log(`Tavzio API (Supabase) running on port ${PORT
 // closed tab, dropped connection) but whose charge genuinely succeeded
 // on the gateway's side. Runs every 2 minutes; each run only touches
 // payments stuck 3+ minutes, so a normal in-progress checkout is never
-// mistaken for an abandoned one. Covers all three redirect-payment
-// paths: paying an existing bill, paying for a new order, and a
-// staff-initiated card_online POS sale.
+// mistaken for an abandoned one. Covers the remaining redirect-payment
+// paths: paying an existing bill, paying for a new order, and a booking
+// deposit. The fourth (staff-initiated card_online POS sale) was
+// removed along with that flow once Send to Kitchen and Payment became
+// separate actions - a physical POS terminal settling via redirect to a
+// hosted gateway page never made sense for a staff-operated counter.
 const { reconcilePendingBillPayments, reconcilePendingOrderPayments } = require('./controllers/publicController');
-const { reconcilePendingPosCardPayments } = require('./controllers/orderController');
 const { reconcilePendingBookingPayments } = require('./controllers/bookingPublicController');
 setInterval(() => {
   reconcilePendingBillPayments().catch((err) => console.error('Bill payment reconciliation run failed:', err.message));
   reconcilePendingOrderPayments().catch((err) => console.error('Order payment reconciliation run failed:', err.message));
-  reconcilePendingPosCardPayments().catch((err) => console.error('POS card payment reconciliation run failed:', err.message));
   reconcilePendingBookingPayments().catch((err) => console.error('Booking payment reconciliation run failed:', err.message));
 }, 2 * 60 * 1000);

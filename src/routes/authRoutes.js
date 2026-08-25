@@ -47,4 +47,8 @@ router.post('/admin/linked-accounts', protect, authorize('super_admin'), createL
 router.delete('/linked-accounts/:linkId', protect, deleteLinkedAccount);
 router.post('/switch-account', protect, loginLimiter, switchAccount);
 
+const { setPin, verifyPinEndpoint } = require('../controllers/pinController');
+router.post('/pin', protect, loginLimiter, setPin);
+router.post('/pin/verify', protect, loginLimiter, verifyPinEndpoint);
+
 module.exports = router;

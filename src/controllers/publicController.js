@@ -796,13 +796,14 @@ const submitOrder = asyncHandler(async (req, res) => {
 
   let orderItemRows = [];
   let total = 0;
+  let menuItemsById = {};
 
   if (requestType === 'order') {
     // Look up each item server-side - never trust client-submitted prices.
     const menuItemIds = items.map((i) => i.menuItemId);
     const { data: menuItems } = await supabaseAdmin
       .from('menu_items')
-      .select('id, name, price, category_id')
+      .select('id, name, price, category_id, station')
       .in('id', menuItemIds)
       .eq('business_id', business.id)
       .eq('is_available', true);
@@ -835,7 +836,7 @@ const submitOrder = asyncHandler(async (req, res) => {
       addonsById = Object.fromEntries((addons || []).map((a) => [a.id, a]));
     }
 
-    const menuItemsById = Object.fromEntries(menuItems.map((m) => [m.id, m]));
+    menuItemsById = Object.fromEntries(menuItems.map((m) => [m.id, m]));
     orderItemRows = items.map((i) => {
       const menuItem = menuItemsById[i.menuItemId];
       const selectedAddons = (i.addonIds || []).map((id) => addonsById[id]).filter(Boolean);
@@ -922,6 +923,16 @@ const submitOrder = asyncHandler(async (req, res) => {
       .from('order_items')
       .insert(orderItemRows.map((i) => ({ ...i, order_id: order.id })));
     if (itemsError) return res.status(400).json({ message: itemsError.message });
+
+    // Real KOT printing - the customer's own self-service tap-order,
+    // same as a staff-entered POS order, should reach the kitchen the
+    // same way. This endpoint has no course-holding concept at all
+    // (unlike POS Terminal), so every item here fires immediately.
+    if (requestType === 'order') {
+      const { printKitchenTickets } = require('../utils/kitchenTicketPrinter');
+      const printableItems = orderItemRows.map((i) => ({ ...i, station: menuItemsById[i.menu_item_id]?.station || '' }));
+      printKitchenTickets(business.id, { tableLabel, note: note || '', orderType: 'dine_in', items: printableItems }).catch(() => {});
+    }
   }
 
   // Same folio_charges pattern createPosOrder already uses for a

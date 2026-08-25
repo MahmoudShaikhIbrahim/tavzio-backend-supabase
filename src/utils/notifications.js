@@ -120,6 +120,22 @@ function sendContractSignLink({ email, businessName, signUrl }) {
   });
 }
 
+// The real close of the sign-then-pay flow: sent once, right when
+// payment is actually confirmed (Stripe's checkout.session.completed,
+// not at the signing step itself - signing alone doesn't guarantee the
+// payment step that follows it succeeds). Links to the same PDF
+// download endpoint the client already used to review the contract
+// before signing - now showing the real signature/stamp images, since
+// the contract's status is genuinely 'signed'/'paid'/'active' by the
+// time this fires.
+function sendSignedContractCopy({ email, businessName, contractNumber, pdfUrl }) {
+  return sendMail({
+    to: email,
+    subject: `Your signed Tavzio agreement - ${contractNumber}`,
+    text: `Hi,\n\nThank you - your payment for ${businessName} was received and your Tavzio service agreement is now fully signed and active. Your countersigned copy is ready here:\n\n${pdfUrl}\n\n- Tavzio`,
+  });
+}
+
 function sendContractSignedReceipt({ email, businessName, receiptNumber, amountAed, pdfUrl }) {
   return sendViaResend({
     to: email,
@@ -286,6 +302,6 @@ async function sendCampaignEmail({ to, subject, text }) {
 
 module.exports = {
   notifyCardUsed, sendDeviceConfirmation, sendMail,
-  sendContractSignLink, sendContractSignedReceipt, sendPaymentFailedWarning, sendAccountSuspended, sendContractTerminated,
+  sendContractSignLink, sendSignedContractCopy, sendContractSignedReceipt, sendPaymentFailedWarning, sendAccountSuspended, sendContractTerminated,
   sendNewInviteEmail, resendInviteEmail, sendCampaignEmail,
 };

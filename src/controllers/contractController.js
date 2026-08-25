@@ -676,27 +676,35 @@ const downloadContractPdf = asyncHandler(async (req, res) => {
     );
   }
 
-  // Stamp and signature images - fixed near the bottom of the current
-  // page, same placement convention as receipts.
-  const stampY = Math.min(doc.y + 30, 700);
-  if (branding?.signature_url) {
-    try {
-      const sigRes = await fetch(branding.signature_url);
-      const sigBuffer = Buffer.from(await sigRes.arrayBuffer());
-      doc.image(sigBuffer, 340, stampY, { width: 140 });
-      doc.moveTo(340, stampY + 46).lineTo(480, stampY + 46).strokeColor('#999').lineWidth(0.5).stroke();
-      doc.fontSize(9).fillColor('#666').text('Authorized signature (Tavzio)', 340, stampY + 50);
-    } catch {
-      // A broken signature URL should never break the whole PDF.
+  // Stamp and signature images - only for a genuinely signed contract,
+  // same real fix as the text block above and for the same reason: an
+  // unsigned draft going out to a client should never carry the actual
+  // signature/stamp images at all. Previously these rendered
+  // unconditionally regardless of status - a client could see (and
+  // potentially extract) the owner's real signature and company stamp
+  // before ever signing or paying anything. Fixed placement - same
+  // convention as receipts.
+  if (isSigned) {
+    const stampY = Math.min(doc.y + 30, 700);
+    if (branding?.signature_url) {
+      try {
+        const sigRes = await fetch(branding.signature_url);
+        const sigBuffer = Buffer.from(await sigRes.arrayBuffer());
+        doc.image(sigBuffer, 340, stampY, { width: 140 });
+        doc.moveTo(340, stampY + 46).lineTo(480, stampY + 46).strokeColor('#999').lineWidth(0.5).stroke();
+        doc.fontSize(9).fillColor('#666').text('Authorized signature (Tavzio)', 340, stampY + 50);
+      } catch {
+        // A broken signature URL should never break the whole PDF.
+      }
     }
-  }
-  if (branding?.stamp_url) {
-    try {
-      const stampRes = await fetch(branding.stamp_url);
-      const stampBuffer = Buffer.from(await stampRes.arrayBuffer());
-      doc.image(stampBuffer, 56, stampY - 10, { width: 110 });
-    } catch {
-      // Same resilience as the signature above.
+    if (branding?.stamp_url) {
+      try {
+        const stampRes = await fetch(branding.stamp_url);
+        const stampBuffer = Buffer.from(await stampRes.arrayBuffer());
+        doc.image(stampBuffer, 56, stampY - 10, { width: 110 });
+      } catch {
+        // Same resilience as the signature above.
+      }
     }
   }
 

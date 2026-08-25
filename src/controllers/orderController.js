@@ -5,6 +5,7 @@ const { maybeAutoCloseTable } = require('../utils/tableAutoClose');
 const { calculateVatInclusive } = require('../utils/vat');
 const { decryptConfig } = require('../utils/credentialEncryption');
 const { primaryClientUrl } = require('../utils/clientUrl');
+const { printKitchenTickets } = require('../utils/kitchenTicketPrinter');
 
 // @route GET /api/businesses/:businessId/orders?status=
 // Only real food orders - call_waiter/request_bill quick requests are
@@ -385,7 +386,7 @@ const placeStaffOrder = asyncHandler(async (req, res) => {
 const ORDER_TYPE_LABELS = { dine_in: 'Dine-in', walk_in: 'Walk-in', pickup: 'Pickup', delivery: 'Delivery' };
 
 const createPosOrder = asyncHandler(async (req, res) => {
-  const { orderType = 'walk_in', items, note = '', paymentMethod, chargeToFolioId, discountType, discountValue, discountReason } = req.body;
+  const { orderType = 'walk_in', items, note = '', chargeToFolioId, discountType, discountValue, discountReason } = req.body;
   let { tableLabel } = req.body;
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ message: 'At least one item is required' });
@@ -402,12 +403,6 @@ const createPosOrder = asyncHandler(async (req, res) => {
   // just a percentage discount of 100, so this same mechanism covers both.
   if (discountType && !discountReason?.trim()) {
     return res.status(400).json({ message: 'A reason is required when applying a discount or comp' });
-  }
-  // "Charge to room" is its own payment method in spirit - it settles
-  // the order immediately the same way cash/card do, just against a
-  // hotel folio instead of a till or a card terminal.
-  if (!chargeToFolioId && !['cash', 'card', 'card_online', 'other'].includes(paymentMethod)) {
-    return res.status(400).json({ message: 'paymentMethod must be cash, card, card_online, or other' });
   }
   if (chargeToFolioId) {
     const { data: folio } = await req.supabase.from('hotel_folios').select('status').eq('id', chargeToFolioId).eq('business_id', req.params.businessId).single();
@@ -473,11 +468,14 @@ const createPosOrder = asyncHandler(async (req, res) => {
       addons: selectedAddons.map((a) => ({ name: a.name, price: a.price })),
       addon_total: addonTotal,
       // card_online stays unpaid until the gateway actually confirms it
-      // via confirmPosCardPayment - every other method settles at the
-      // counter in the same motion as ringing it up, so it's paid
-      // immediately, same as before.
-      paid: paymentMethod !== 'card_online',
-      paid_at: paymentMethod !== 'card_online' ? new Date().toISOString() : null,
+      // Real fix: Send to Kitchen and Payment are separate actions now
+      // (a dine-in table can sit open through the whole meal; a pickup
+      // order can be paid on collection, well after being made) - items
+      // are unpaid at creation, always, except chargeToFolioId, which
+      // genuinely IS the settlement (charging to the guest's room),
+      // not a placeholder for a tender choice made later.
+      paid: !!chargeToFolioId,
+      paid_at: chargeToFolioId ? new Date().toISOString() : null,
       course,
       course_status: course ? 'held' : 'fired',
       fired_at: course ? null : new Date().toISOString(),
@@ -502,21 +500,19 @@ const createPosOrder = asyncHandler(async (req, res) => {
     }
   }
 
-  // Cash orders get tied to the staff member's currently open till, so
-  // it counts toward their reconciliation at close-out. Card/other
-  // payments (an external card machine, etc) never touch the till at
-  // all - only cash needs physical reconciliation.
-  //
-  // For a hotel, the till is also how an order gets tagged with which
-  // outlet it came from - since a till is locked to one outlet for its
-  // whole session, that's the real, unspoofable source of truth (never
-  // taken from client input directly). This means a hotel POS order of
-  // ANY payment method needs an open till, not just cash - the till is
-  // what makes "which station is this" a real, enforced fact rather
-  // than just a label someone typed in.
+  // Real fix, consequence of Send to Kitchen and Payment being separate
+  // actions now: which till gets credit for cash is decided at Payment
+  // time (see recordPayment), not here - payment method isn't even
+  // known yet at this point, an order can sit open for a while before
+  // anyone chooses a tender. What's STILL required here, hotel-only: an
+  // open till is how an order gets tagged with which outlet it came
+  // from - a till is locked to one outlet for its whole session, the
+  // real, unspoofable source of truth (never taken from client input
+  // directly). That's an outlet-identity fact, unrelated to payment
+  // timing, so it stays a creation-time requirement for hotels only.
   let tillSessionId = null;
   let hotelOutletId = null;
-  if (paymentMethod === 'cash' || business?.category === 'hotel') {
+  if (business?.category === 'hotel') {
     const { data: till } = await req.supabase
       .from('till_sessions')
       .select('id, outlet_id')
@@ -524,7 +520,7 @@ const createPosOrder = asyncHandler(async (req, res) => {
       .eq('status', 'open')
       .maybeSingle();
     if (!till) {
-      return res.status(400).json({ message: business?.category === 'hotel' ? 'Open a till for your outlet before taking an order' : 'Open a till before taking a cash order' });
+      return res.status(400).json({ message: 'Open a till for your outlet before taking an order' });
     }
     tillSessionId = till.id;
     hotelOutletId = till.outlet_id;
@@ -541,7 +537,7 @@ const createPosOrder = asyncHandler(async (req, res) => {
       total,
       status: 'pending',
       source: 'staff_pos',
-      payment_method: chargeToFolioId ? 'other' : paymentMethod,
+      payment_method: chargeToFolioId ? 'other' : null,
       till_session_id: tillSessionId,
       hotel_outlet_id: hotelOutletId,
       placed_by: req.user.id,
@@ -572,42 +568,29 @@ const createPosOrder = asyncHandler(async (req, res) => {
     .select();
   if (itemsError) return res.status(400).json({ message: itemsError.message });
 
-  // card_online: generate a real gateway session and stop here - stock
-  // deduction and POS push wait for genuine confirmation, same
-  // never-trust-the-redirect-alone rule as every other online payment
-  // in this codebase.
-  if (paymentMethod === 'card_online') {
-    const { supabaseAdmin: sa } = require('../config/supabaseClient');
-    const { data: config } = await sa.from('pos_integrations').select('config').eq('business_id', req.params.businessId).eq('purpose', 'payment').eq('enabled', true).maybeSingle();
-    if (config) config.config = decryptConfig(config.config);
-    const provider = config?.config?.provider;
-    const adapter = provider === 'telr' ? require('../utils/telrAdapter') : provider === 'ngenius' ? require('../utils/ngeniusAdapter') : provider === 'ziina' ? require('../utils/ziinaBillAdapter') : null;
-    if (!config || !adapter) {
-      await req.supabase.from('orders').update({ status: 'cancelled' }).eq('id', order.id);
-      return res.status(400).json({ message: 'No online payment provider connected for this business' });
-    }
-
-    const { data: txn } = await sa
-      .from('payment_transactions')
-      .insert({ business_id: req.params.businessId, provider, transaction_type: 'charge', amount_aed: total, context_type: 'pos_order', context_id: order.id })
-      .select()
-      .single();
-
-    const appUrl = primaryClientUrl();
-    const session = await adapter.createPaymentSession(config.config, total, `POS order - ${tableLabel}`, txn.id, `${appUrl}/admin/dashboard/pos?posPaymentTxnId=${txn.id}`);
-    if (!session.success) {
-      await sa.from('payment_transactions').update({ status: 'failed', failure_reason: session.error }).eq('id', txn.id);
-      await req.supabase.from('orders').update({ status: 'cancelled' }).eq('id', order.id);
-      return res.status(400).json({ message: session.error });
-    }
-    await sa.from('payment_transactions').update({ provider_ref: session.providerRef || '' }).eq('id', txn.id);
-    return res.status(201).json({ order, items: insertedItems, redirectUrl: session.redirectUrl, transactionId: txn.id, awaitingPayment: true });
-  }
-
   if (business?.features?.inventory?.enabled) {
     const { deductStock } = require('../utils/inventoryStock');
     deductStock({ businessId: req.params.businessId, orderItemRows: insertedItems, orderId: order.id }).catch(() => {});
   }
+
+  // Real KOT printing - only items firing immediately (course_status
+  // 'fired'); anything held for a later course prints when fireCourse
+  // actually releases it, not here. Never awaited/blocking - a slow or
+  // offline printer should never delay the kitchen screen or the
+  // response to the terminal.
+  const firedItems = insertedItems
+    .filter((i) => i.course_status === 'fired')
+    .map((i) => ({ ...i, station: menuItemsById[i.menu_item_id]?.station || '' }));
+  if (firedItems.length > 0) {
+    printKitchenTickets(req.params.businessId, { tableLabel, note, orderType, items: firedItems }).catch(() => {});
+  }
+
+  // No payments insert here anymore - Send to Kitchen no longer settles
+  // anything by itself (see recordPayment below for where that real
+  // ledger entry now gets created, at actual settlement time). The one
+  // exception, chargeToFolioId, already has its own real ledger via the
+  // hotel_folio_charges insert above - charging to a room genuinely is
+  // the settlement, not a placeholder for a tender choice made later.
 
   if (business?.features?.ordering?.posIntegration) {
     const { data: integration } = await supabaseAdmin
@@ -627,24 +610,41 @@ const createPosOrder = asyncHandler(async (req, res) => {
 });
 
 // @route POST /api/businesses/:businessId/orders/:orderId/manual-payment
-// Body: { itemIds: string[], method: 'card_machine' | 'cash' }
-// Records money staff collected OUTSIDE Tavzio entirely (the restaurant's
-// own card machine, or cash) - lives as an ordinary row in the same
-// `payments` table as online Pay Bill transactions, distinguished only by
-// provider ('manual_cash' / 'manual_card_machine'). This
-// is the ONLY thing that ever marks an item paid when money didn't move
-// through a Tavzio gateway - it can never be created without pointing at
-// real, currently-unpaid items already on this order, by design: there is
-// no path here that lets a payment exist disconnected from real items.
+// Body: { itemIds: string[], tenders: [{ method: 'cash'|'card', amount: number }], pin: string }
+// The one real settlement action for anything that didn't go through a
+// live Tavzio gateway - a restaurant's own card machine, or cash. Lives
+// as ordinary rows in the same `payments` table as online Pay Bill
+// transactions, distinguished only by provider ('pos_cash' /
+// 'pos_card'). Shared by both POS Terminal (paying right after Send to
+// Kitchen) and Orders (paying an order that's been sitting open for a
+// while, possibly rung up by a different staff member's shift) -
+// deliberately the same function either way, so the security guarantees
+// (PIN, real tender records, real audit trail) never depend on which
+// screen it was opened from.
+//
+// Real multi-tender: tenders is an array, not a single method - a bill
+// can be split cash+card in one settlement, one payments row per
+// tender actually used. PIN is re-verified HERE, not trusted from an
+// earlier /pin/verify call - closes the gap a "verify now, act later"
+// flow would leave open between confirming identity and moving real
+// money into the ledger.
 const recordManualPayment = asyncHandler(async (req, res) => {
-  const { itemIds, method } = req.body;
-  const allowedMethods = ['card_machine', 'cash'];
+  const { itemIds, tenders, pin } = req.body;
   if (!Array.isArray(itemIds) || itemIds.length === 0) {
     return res.status(400).json({ message: 'No items selected' });
   }
-  if (!allowedMethods.includes(method)) {
-    return res.status(400).json({ message: 'Invalid payment method' });
+  if (!Array.isArray(tenders) || tenders.length === 0) {
+    return res.status(400).json({ message: 'At least one tender (cash or card) is required' });
   }
+  for (const tender of tenders) {
+    if (!['cash', 'card'].includes(tender.method) || !(Number(tender.amount) > 0)) {
+      return res.status(400).json({ message: 'Each tender needs a valid method (cash or card) and a positive amount' });
+    }
+  }
+
+  const { checkPin } = require('./pinController');
+  const pinResult = await checkPin(req.user.id, pin);
+  if (!pinResult.ok) return res.status(pinResult.status).json({ message: pinResult.message });
 
   // Tenant-scoped lookup via req.supabase (RLS) confirms this order
   // genuinely belongs to this business before anything is written -
@@ -664,26 +664,54 @@ const recordManualPayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'None of those items are unpaid on this order' });
   }
 
-  const amount = selectedItems.reduce((sum, i) => sum + (i.unit_price + Number(i.addon_total || 0)) * i.quantity, 0);
+  const amountOwed = selectedItems.reduce((sum, i) => sum + (i.unit_price + Number(i.addon_total || 0)) * i.quantity, 0);
+  const tenderTotal = tenders.reduce((sum, t) => sum + Number(t.amount), 0);
+  // 1 fils tolerance for float rounding - not a loophole, just the same
+  // allowance any real cash drawer math needs.
+  if (Math.abs(tenderTotal - amountOwed) > 0.01) {
+    return res.status(400).json({ message: `Tenders total AED ${tenderTotal.toFixed(2)} but AED ${amountOwed.toFixed(2)} is owed` });
+  }
   const settledIds = selectedItems.map((i) => i.id);
+
+  // Cash needs a real open till to be attributed to - the till that's
+  // open RIGHT NOW, at the moment this cash is actually being handed
+  // over, not whichever till (if any) was open when the order was first
+  // rung in. This is what makes closeTill's reconciliation correct even
+  // when the order was created hours earlier or by someone else's shift.
+  let tillSessionId = null;
+  if (tenders.some((t) => t.method === 'cash')) {
+    const { data: till } = await req.supabase
+      .from('till_sessions')
+      .select('id')
+      .eq('staff_id', req.user.id)
+      .eq('status', 'open')
+      .maybeSingle();
+    if (!till) return res.status(400).json({ message: 'Open a till before recording a cash payment' });
+    tillSessionId = till.id;
+  }
 
   // supabaseAdmin here deliberately - payments has no authenticated
   // insert policy at all (every existing write path is service-role,
   // matching the online-payment flows), so a manual settlement has to
   // go through it too. Tenant safety already happened above via
   // req.supabase - this write is scoped to exactly the items just
-  // verified to belong to this business's order.
-  const { error: paymentError } = await supabaseAdmin.from('payments').insert({
+  // verified to belong to this business's order. One row per tender
+  // actually used, not one row for the whole bill, so a split
+  // cash+card payment shows up as two real, separately-attributable
+  // ledger entries instead of one row hiding a mixed amount.
+  const paymentRows = tenders.map((t) => ({
     business_id: req.params.businessId,
     card_id: order.card_id,
     order_item_ids: settledIds,
-    amount,
+    amount: Number(t.amount),
     tip_amount: 0,
     status: 'completed',
-    provider: `manual_${method}`,
+    provider: `pos_${t.method}`,
     provider_ref: '',
     recorded_by: req.user.id,
-  });
+    till_session_id: t.method === 'cash' ? tillSessionId : null,
+  }));
+  const { error: paymentError } = await supabaseAdmin.from('payments').insert(paymentRows);
   if (paymentError) return res.status(400).json({ message: paymentError.message });
 
   await supabaseAdmin
@@ -778,110 +806,6 @@ const listCashPendingItems = asyncHandler(async (req, res) => {
   res.json(items);
 });
 
-// @route POST /api/businesses/:businessId/orders/pos/confirm-card-payment
-// Body: { transactionId }
-// The staff-side equivalent of confirmFolioPayment - verifies the real
-// gateway outcome, and only now does everything that was deferred at
-// order creation: marking items paid, deducting stock, pushing to POS.
-const confirmPosCardPayment = asyncHandler(async (req, res) => {
-  const { transactionId } = req.body;
-  if (!transactionId) return res.status(400).json({ message: 'transactionId is required' });
-
-  const { data: txn } = await req.supabase.from('payment_transactions').select('*').eq('id', transactionId).eq('business_id', req.params.businessId).single();
-  if (!txn) return res.status(404).json({ message: 'Transaction not found' });
-  if (txn.status === 'completed') return res.json({ status: 'completed' });
-  if (txn.status === 'failed') return res.status(402).json({ message: txn.failure_reason || 'Payment failed', status: 'failed' });
-
-  const { data: config } = await req.supabase.from('pos_integrations').select('config').eq('business_id', req.params.businessId).eq('purpose', 'payment').eq('enabled', true).maybeSingle();
-  if (config) config.config = decryptConfig(config.config);
-  const adapter = txn.provider === 'telr' ? require('../utils/telrAdapter') : txn.provider === 'ngenius' ? require('../utils/ngeniusAdapter') : txn.provider === 'ziina' ? require('../utils/ziinaBillAdapter') : null;
-  const result = adapter ? await adapter.checkPaymentStatus(config?.config, txn.provider_ref) : { success: false, error: 'No adapter for this provider' };
-
-  if (!result.success || !result.paid) {
-    await req.supabase.from('payment_transactions').update({ status: 'failed', failure_reason: result.error || 'Not confirmed as paid' }).eq('id', txn.id);
-    return res.status(402).json({ message: result.error || 'Payment not confirmed', status: 'failed' });
-  }
-
-  await req.supabase.from('payment_transactions').update({ status: 'completed', confirmed_at: new Date().toISOString() }).eq('id', txn.id);
-
-  const { data: order } = await req.supabase.from('orders').select('*, order_items(*)').eq('id', txn.context_id).single();
-  if (!order) return res.status(404).json({ message: 'Order not found' });
-
-  await req.supabase.from('order_items').update({ paid: true, paid_at: new Date().toISOString() }).eq('order_id', order.id);
-  await req.supabase.from('orders').update({ payment_transaction_id: txn.id }).eq('id', order.id);
-
-  const { data: business } = await req.supabase.from('businesses').select('features').eq('id', req.params.businessId).single();
-  if (business?.features?.inventory?.enabled) {
-    const { deductStock } = require('../utils/inventoryStock');
-    deductStock({ businessId: req.params.businessId, orderItemRows: order.order_items, orderId: order.id }).catch(() => {});
-  }
-
-  res.json({ status: 'completed', order, vatBreakdown: calculateVatInclusive(order.total) });
-});
-
-// Same reconciliation pattern as publicController's two - recovers a
-// staff-initiated card_online POS sale where the confirm step never
-// happened (browser closed, terminal lost network right after the
-// charge). Careful distinction the manual endpoint above doesn't make:
-// a failed *check* (network hiccup, provider outage) is not the same
-// as a genuinely *declined* payment - only the latter gets marked
-// failed here, so a transient blip doesn't wrongly kill a transaction
-// that's actually fine and just needs to be checked again next tick.
-const RECONCILE_AFTER_MINUTES = 3;
-const GIVE_UP_AFTER_HOURS = 24;
-
-async function reconcilePendingPosCardPayments() {
-  const cutoff = new Date(Date.now() - RECONCILE_AFTER_MINUTES * 60000).toISOString();
-  const giveUpCutoff = new Date(Date.now() - GIVE_UP_AFTER_HOURS * 3600000).toISOString();
-
-  const { data: stuckTxns } = await supabaseAdmin
-    .from('payment_transactions')
-    .select('*')
-    .eq('status', 'pending')
-    .in('provider', ['telr', 'ngenius', 'ziina'])
-    .lt('created_at', cutoff);
-
-  for (const txn of stuckTxns || []) {
-    if (txn.created_at < giveUpCutoff) {
-      await supabaseAdmin.from('payment_transactions').update({ status: 'failed', failure_reason: 'Never confirmed - gave up after 24 hours' }).eq('id', txn.id);
-      continue;
-    }
-
-    try {
-      const { data: config } = await supabaseAdmin.from('pos_integrations').select('config').eq('business_id', txn.business_id).eq('purpose', 'payment').eq('enabled', true).maybeSingle();
-      if (!config) continue;
-      const decryptedConfig = decryptConfig(config.config);
-
-      const adapter = txn.provider === 'telr' ? require('../utils/telrAdapter') : txn.provider === 'ngenius' ? require('../utils/ngeniusAdapter') : txn.provider === 'ziina' ? require('../utils/ziinaBillAdapter') : null;
-      if (!adapter) continue;
-
-      const result = await adapter.checkPaymentStatus(decryptedConfig, txn.provider_ref);
-      if (!result.success) continue; // transient check failure - try again next tick
-
-      if (!result.paid) {
-        await supabaseAdmin.from('payment_transactions').update({ status: 'failed', failure_reason: result.error || 'Not confirmed as paid' }).eq('id', txn.id);
-        continue;
-      }
-
-      await supabaseAdmin.from('payment_transactions').update({ status: 'completed', confirmed_at: new Date().toISOString() }).eq('id', txn.id);
-
-      const { data: order } = await supabaseAdmin.from('orders').select('*, order_items(*)').eq('id', txn.context_id).single();
-      if (!order) continue;
-
-      await supabaseAdmin.from('order_items').update({ paid: true, paid_at: new Date().toISOString() }).eq('order_id', order.id);
-      await supabaseAdmin.from('orders').update({ payment_transaction_id: txn.id }).eq('id', order.id);
-
-      const { data: business } = await supabaseAdmin.from('businesses').select('features').eq('id', txn.business_id).single();
-      if (business?.features?.inventory?.enabled) {
-        const { deductStock } = require('../utils/inventoryStock');
-        deductStock({ businessId: txn.business_id, orderItemRows: order.order_items, orderId: order.id }).catch(() => {});
-      }
-    } catch (err) {
-      console.error(`POS card payment reconciliation failed for transaction ${txn.id}:`, err.message);
-    }
-  }
-}
-
 // @route POST /api/businesses/:businessId/orders/:orderId/fire-course
 // Body: { course }
 // Releases every held item of that course on this order to the kitchen
@@ -897,10 +821,21 @@ const fireCourse = asyncHandler(async (req, res) => {
     .eq('order_id', req.params.orderId)
     .eq('course', course)
     .eq('course_status', 'held')
-    .select();
+    .select('*, menu_items(station)');
   if (error) return res.status(400).json({ message: error.message });
   if (!data || data.length === 0) return res.status(404).json({ message: 'No held items found for that course' });
+
+  // Real KOT printing for exactly what just fired - a held course's
+  // items were deliberately not printed at order-creation time (see
+  // createPosOrder), this is the actual moment they're supposed to
+  // reach the kitchen.
+  const { data: order } = await req.supabase.from('orders').select('table_label, note, order_type').eq('id', req.params.orderId).single();
+  if (order) {
+    const printableItems = data.map((i) => ({ ...i, station: i.menu_items?.station || '' }));
+    printKitchenTickets(req.params.businessId, { tableLabel: order.table_label, note: order.note, orderType: order.order_type, items: printableItems }).catch(() => {});
+  }
+
   res.json({ message: `Fired ${data.length} item(s)`, items: data });
 });
 
-module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, confirmPosCardPayment, listRequests, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse, reconcilePendingPosCardPayments };
+module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, listRequests, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse };

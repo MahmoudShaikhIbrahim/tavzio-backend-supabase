@@ -8,6 +8,7 @@ const {
   deleteBusiness,
 } = require('../controllers/businessController');
 const { getReceiptBranding, updateReceiptBranding } = require('../controllers/receiptController');
+const { listKitchenStationPrinters, upsertKitchenStationPrinter, deleteKitchenStationPrinter } = require('../controllers/kitchenPrinterController');
 const { protect, authorize, enforceTenant } = require('../middleware/auth');
 const cardRoutes = require('./cardRoutes');
 const analyticsRoutes = require('./analyticsRoutes');
@@ -81,6 +82,10 @@ router.use('/:businessId/cards', cardRoutes);
 router.use('/:businessId/analytics', analyticsRoutes);
 router.use('/:businessId/loyalty', loyaltyRoutes);
 router.use('/:businessId/staff', staffRoutes);
+
+router.get('/:businessId/kitchen-station-printers', protect, enforceTenant, listKitchenStationPrinters);
+router.put('/:businessId/kitchen-station-printers', protect, enforceTenant, authorize('business_owner', 'super_admin'), upsertKitchenStationPrinter);
+router.delete('/:businessId/kitchen-station-printers/:id', protect, enforceTenant, authorize('business_owner', 'super_admin'), deleteKitchenStationPrinter);
 router.use('/:businessId/staff-shifts', require('./staffShiftRoutes'));
 router.use('/:businessId/hr', require('./hrRoutes'));
 router.use('/:businessId/menu', menuRoutes);
