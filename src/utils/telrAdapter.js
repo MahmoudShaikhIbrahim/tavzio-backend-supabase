@@ -25,7 +25,7 @@ const TELR_ENDPOINT = 'https://secure.telr.com/gateway/order.json';
 // (e.g. 45.50) - Telr takes decimal amounts directly, like Tap.
 async function createPaymentSession(config, amountAed, description, cartId, returnUrl) {
   if (!config?.storeId || !config?.authKey) {
-    return { success: false, error: 'Telr is not configured for this business' };
+    return { success: false, error: 'A payment gateway is not configured for this business' };
   }
 
   try {
@@ -71,7 +71,7 @@ async function createPaymentSession(config, amountAed, description, cartId, retu
 // 1 is pending, negative/other codes are declined/cancelled/expired.
 async function checkPaymentStatus(config, providerRef) {
   if (!config?.storeId || !config?.authKey) {
-    return { success: false, error: 'Telr is not configured for this business' };
+    return { success: false, error: 'A payment gateway is not configured for this business' };
   }
 
   try {
@@ -109,7 +109,7 @@ async function checkPaymentStatus(config, providerRef) {
 // checkout time (Telr's check response includes transaction.ref).
 async function createRefund(config, tranRef, amountAed) {
   if (!config?.storeId || !config?.authKey) {
-    return { success: false, error: 'Telr is not configured for this business' };
+    return { success: false, error: 'A payment gateway is not configured for this business' };
   }
   if (!tranRef) {
     return { success: false, error: 'Missing Telr transaction reference to refund - this payment may predate refund tracking' };

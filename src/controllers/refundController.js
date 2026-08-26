@@ -28,14 +28,15 @@ const refundPayment = asyncHandler(async (req, res) => {
 
   const paymentProvider = payment.provider || 'tap';
 
-  // Manual payments (cash / card machine) can't be refunded here at
-  // all - there's no gateway transaction to reverse, and no UI path to
-  // this anymore either. Blocked explicitly rather than left to fall
-  // through to the gateway logic below, which would incorrectly try to
-  // call a real payment provider's API for a transaction that never
-  // went through one.
-  if (paymentProvider.startsWith('manual_')) {
-    return res.status(400).json({ message: 'Manual payments cannot be refunded from here' });
+  // Manual payments (cash / card machine, stored as pos_cash/pos_card)
+  // can't be refunded here at all - there's no gateway transaction to
+  // reverse, since staff simply confirmed the physical machine already
+  // charged the card. Real, honest message: this money can only move
+  // back through the same physical machine or register it came from,
+  // never through Tavzio's software, regardless of which gateway (if
+  // any) is configured for this business.
+  if (paymentProvider.startsWith('manual_') || paymentProvider.startsWith('pos_')) {
+    return res.status(400).json({ message: 'This was a manual counter payment (cash or card machine) - refund it directly on that same machine or register. Tavzio never processed the original charge, so it has no way to reverse it automatically.' });
   }
 
   // Deliberately supabaseAdmin, not req.supabase: pos_integrations for

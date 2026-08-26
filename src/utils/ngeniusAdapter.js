@@ -53,7 +53,7 @@ async function getAccessToken(config) {
 // caught immediately and visibly in the first test payment, not silently.
 async function createPaymentSession(config, amountAed, description, cartId, returnUrl) {
   if (!config?.apiKey || !config?.outletRef) {
-    return { success: false, error: 'N-Genius is not configured for this business' };
+    return { success: false, error: 'A payment gateway is not configured for this business' };
   }
 
   try {
@@ -94,7 +94,7 @@ async function createPaymentSession(config, amountAed, description, cartId, retu
 // since SALE-action orders auto-capture.
 async function checkPaymentStatus(config, providerRef) {
   if (!config?.apiKey || !config?.outletRef) {
-    return { success: false, paid: false, error: 'N-Genius is not configured for this business' };
+    return { success: false, paid: false, error: 'A payment gateway is not configured for this business' };
   }
 
   try {
@@ -127,7 +127,7 @@ async function checkPaymentStatus(config, providerRef) {
 // (fils), same convention as order creation.
 async function createRefund(config, providerRef, amountAed) {
   if (!config?.apiKey || !config?.outletRef) {
-    return { success: false, error: 'N-Genius is not configured for this business' };
+    return { success: false, error: 'A payment gateway is not configured for this business' };
   }
 
   try {

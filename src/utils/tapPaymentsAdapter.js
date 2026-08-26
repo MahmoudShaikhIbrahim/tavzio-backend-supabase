@@ -20,7 +20,7 @@
 // decimal amounts directly (unlike Square, which wants the smallest unit).
 async function createCharge(config, tapToken, amountAed, description) {
   if (!config?.secretKey) {
-    return { success: false, error: 'Tap Payments is not configured for this business' };
+    return { success: false, error: 'A payment gateway is not configured for this business' };
   }
 
   try {
@@ -56,7 +56,7 @@ async function createCharge(config, tapToken, amountAed, description) {
 // amount than the original charge.
 async function createRefund(config, chargeId, amountAed, reason) {
   if (!config?.secretKey) {
-    return { success: false, error: 'Tap Payments is not configured for this business' };
+    return { success: false, error: 'A payment gateway is not configured for this business' };
   }
 
   try {
@@ -97,7 +97,7 @@ async function createRefund(config, chargeId, amountAed, reason) {
 // actually uses.
 async function createPaymentSession(config, amountAed, description, cartId, returnUrl) {
   if (!config?.secretKey) {
-    return { success: false, error: 'Tap Payments is not configured for this business' };
+    return { success: false, error: 'A payment gateway is not configured for this business' };
   }
 
   try {
@@ -138,7 +138,7 @@ async function createPaymentSession(config, amountAed, description, cartId, retu
 // in-page Apple/Google Pay flow gets one.
 async function checkPaymentStatus(config, chargeId) {
   if (!config?.secretKey) {
-    return { success: false, error: 'Tap Payments is not configured for this business' };
+    return { success: false, error: 'A payment gateway is not configured for this business' };
   }
   try {
     const response = await fetch(`https://api.tap.company/v2/charges/${chargeId}`, {

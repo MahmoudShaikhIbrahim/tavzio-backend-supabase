@@ -33,7 +33,7 @@ function toFils(amountAed) {
 // amountAed is a plain decimal (e.g. 45.50), like every other adapter here.
 async function createPaymentSession(config, amountAed, description, cartId, returnUrl) {
   if (!config?.apiKey) {
-    return { success: false, error: 'Ziina is not configured for this business' };
+    return { success: false, error: 'A payment gateway is not configured for this business' };
   }
 
   try {
@@ -69,7 +69,7 @@ async function createPaymentSession(config, amountAed, description, cartId, retu
 // the return URL proves nothing, only this does.
 async function checkPaymentStatus(config, providerRef) {
   if (!config?.apiKey) {
-    return { success: false, error: 'Ziina is not configured for this business' };
+    return { success: false, error: 'A payment gateway is not configured for this business' };
   }
   if (!providerRef) {
     return { success: false, error: 'Missing Ziina payment intent id' };
@@ -104,7 +104,7 @@ async function checkPaymentStatus(config, providerRef) {
 // but isn't polled here, consistent with the other two adapters.
 async function createRefund(config, providerRef, amountAed) {
   if (!config?.apiKey) {
-    return { success: false, error: 'Ziina is not configured for this business' };
+    return { success: false, error: 'A payment gateway is not configured for this business' };
   }
   if (!providerRef) {
     return { success: false, error: 'Missing Ziina payment intent id to refund' };
