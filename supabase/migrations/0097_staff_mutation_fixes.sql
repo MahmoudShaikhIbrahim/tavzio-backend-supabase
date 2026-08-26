@@ -12,6 +12,8 @@
 -- root cause pattern (a mutation exists in app code with no matching
 -- RLS policy behind it), just never caught until Deactivate/full-access
 -- was actually clicked on an account with real activity.
+drop policy if exists "business owner can update own business staff" on public.profiles;
+
 create policy "business owner can update own business staff"
   on public.profiles for update
   to authenticated

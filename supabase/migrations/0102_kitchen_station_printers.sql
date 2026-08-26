@@ -23,6 +23,8 @@ create index if not exists idx_kitchen_station_printers_business on public.kitch
 
 alter table public.kitchen_station_printers enable row level security;
 
+drop policy if exists "tenant manages own kitchen station printers" on public.kitchen_station_printers;
+
 create policy "tenant manages own kitchen station printers"
   on public.kitchen_station_printers for all
   to authenticated

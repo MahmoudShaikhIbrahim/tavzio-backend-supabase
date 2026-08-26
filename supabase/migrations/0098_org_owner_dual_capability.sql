@@ -53,22 +53,22 @@ where p.role = 'org_owner' and p.business_id is not null;
 -- would silently fail the exact same way the Express-level check just
 -- got fixed above. All four rewritten to accept either the standalone
 -- kind (role = 'org_owner') or the self-service kind (is_org_owner).
-drop policy "org_owner and super_admin manage own organization" on public.organizations;
+drop policy if exists "org_owner and super_admin manage own organization" on public.organizations;
 create policy "org_owner and super_admin manage own organization" on public.organizations for all to authenticated
   using (public.current_role_name() = 'super_admin' or id = (select organization_id from public.profiles where id = auth.uid() and (role = 'org_owner' or is_org_owner)))
   with check (public.current_role_name() = 'super_admin' or id = (select organization_id from public.profiles where id = auth.uid() and (role = 'org_owner' or is_org_owner)));
 
-drop policy "org_owner and super_admin manage own org menu categories" on public.organization_menu_categories;
+drop policy if exists "org_owner and super_admin manage own org menu categories" on public.organization_menu_categories;
 create policy "org_owner and super_admin manage own org menu categories" on public.organization_menu_categories for all to authenticated
   using (public.current_role_name() = 'super_admin' or organization_id = (select organization_id from public.profiles where id = auth.uid() and (role = 'org_owner' or is_org_owner)))
   with check (public.current_role_name() = 'super_admin' or organization_id = (select organization_id from public.profiles where id = auth.uid() and (role = 'org_owner' or is_org_owner)));
 
-drop policy "org_owner and super_admin manage own org menu items" on public.organization_menu_items;
+drop policy if exists "org_owner and super_admin manage own org menu items" on public.organization_menu_items;
 create policy "org_owner and super_admin manage own org menu items" on public.organization_menu_items for all to authenticated
   using (public.current_role_name() = 'super_admin' or organization_id = (select organization_id from public.profiles where id = auth.uid() and (role = 'org_owner' or is_org_owner)))
   with check (public.current_role_name() = 'super_admin' or organization_id = (select organization_id from public.profiles where id = auth.uid() and (role = 'org_owner' or is_org_owner)));
 
-drop policy "business sees own po allocations, org_owner sees all" on public.purchase_order_allocations;
+drop policy if exists "business sees own po allocations, org_owner sees all" on public.purchase_order_allocations;
 create policy "business sees own po allocations, org_owner sees all" on public.purchase_order_allocations for all to authenticated
   using (
     public.current_role_name() = 'super_admin'

@@ -17,7 +17,7 @@
 -- designed, so it stays invisible to and undeletable by any single
 -- member business - only the self-service, single-business kind gets
 -- this new visibility.
-drop policy "business owner can read own business staff" on public.profiles;
+drop policy if exists "business owner can read own business staff" on public.profiles;
 
 create policy "business owner can read own business staff"
   on public.profiles for select

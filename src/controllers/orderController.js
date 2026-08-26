@@ -776,10 +776,10 @@ const recordManualPayment = asyncHandler(async (req, res) => {
     actor: req.user,
     action: 'manual_payment_recorded',
     targetId: order.id,
-    details: { method, amount, itemCount: settledIds.length },
+    details: { tenders, amount: amountOwed, itemCount: settledIds.length },
   });
 
-  res.status(201).json({ amount, itemCount: settledIds.length, method });
+  res.status(201).json({ amount: amountOwed, itemCount: settledIds.length, tenders });
 });
 
 // @route GET /api/businesses/:businessId/orders/cash-pending

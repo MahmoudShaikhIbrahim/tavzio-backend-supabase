@@ -136,11 +136,18 @@ function sendSupplierOrderEmail({ supplierEmail, supplierName, businessName, bus
     `- ${businessName} (sent via Tavzio)`,
   ].filter(Boolean).join('\n');
 
-  return sendMail({
+  return sendViaResend({
     to: supplierEmail,
     subject: `New order from ${businessName}${poNumber ? ` - PO ${poNumber}` : ''}`,
     text,
+    from: supplyFromAddress(businessName),
     replyTo: businessEmail || undefined,
+    // A real copy in the business's own inbox - the one thing no From
+    // address, however well it's framed, could ever provide on its
+    // own. Nothing else about the flow needs businessEmail to be set
+    // for this to work at all - if it's missing, this and replyTo both
+    // simply don't apply, the order still sends.
+    bcc: businessEmail || undefined,
   });
 }
 
@@ -248,24 +255,38 @@ const RESEND_SECURITY_FROM = process.env.RESEND_SECURITY_FROM_ADDRESS || 'Tavzio
 // customers through Tavzio), not "marketing@" - that name would read
 // as Tavzio's own marketing to prospects, which this isn't.
 const RESEND_CAMPAIGNS_FROM = process.env.RESEND_CAMPAIGNS_FROM_ADDRESS || 'Tavzio Campaigns <campaigns@tavzio.ae>';
+// Supplier orders get their own real identity too, same reasoning as
+// the other three - but unlike those, the display name here is built
+// per-business, not fixed, since the supplier needs to see WHICH
+// business is actually ordering, not just that it came via Tavzio.
+// Domain verification on Resend covers the whole domain, not
+// individual mailboxes - this address needed zero new setup, since
+// tavzio.ae is already verified (proven by invites@ already working).
+const RESEND_SUPPLY_ADDRESS = process.env.RESEND_SUPPLY_FROM_ADDRESS || 'supply@tavzio.ae';
+function supplyFromAddress(businessName) {
+  return `${businessName} (via Tavzio Supply) <${RESEND_SUPPLY_ADDRESS}>`;
+}
 
-async function sendViaResend({ to, subject, text, from = RESEND_INVITE_FROM }) {
+async function sendViaResend({ to, subject, text, from = RESEND_INVITE_FROM, replyTo, bcc }) {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     console.error('RESEND_API_KEY is not set - email was not sent.');
     return;
   }
+  const body = { from, to, subject, text };
+  if (replyTo) body.reply_to = replyTo;
+  if (bcc) body.bcc = bcc;
   const res = await fetch(RESEND_API_URL, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ from, to, subject, text }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Resend send failed (${res.status}): ${body}`);
+    const resBody = await res.text().catch(() => '');
+    throw new Error(`Resend send failed (${res.status}): ${resBody}`);
   }
 }
 
