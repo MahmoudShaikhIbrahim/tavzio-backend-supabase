@@ -1,20 +1,19 @@
 const asyncHandler = require('../utils/asyncHandler');
 
-// @route GET /api/businesses/:businessId/tables-floor
-// Every active card (table) with its floor status, seat count, and
-// whatever's currently unpaid/active on it - the actual floor plan view.
-// Named "tables-floor" rather than reusing /cards, since /cards already
-// means something else (card lifecycle management, not floor status).
-const listFloorTables = asyncHandler(async (req, res) => {
-  const { data: cards, error } = await req.supabase
-    .from('cards')
-    .select('*')
+// @route GET /api/businesses/:businessId/tables
+// The real floor plan view - every table, whether or not it currently
+// has a card connected, with its connected card (if any) and whatever
+// orders are active on it right now.
+const listTables = asyncHandler(async (req, res) => {
+  const { data: tables, error } = await req.supabase
+    .from('tables')
+    .select('*, cards(id, uid, label, status)')
     .eq('business_id', req.params.businessId)
-    .eq('status', 'active')
     .order('label');
   if (error) return res.status(400).json({ message: error.message });
 
-  const { data: orders } = await req.supabase
+  const connectedCardIds = tables.map((t) => t.cards?.[0]?.id).filter(Boolean);
+  const { data: orders } = connectedCardIds.length > 0 ? await req.supabase
     .from('orders')
     .select('id, card_id, total, status')
     .eq('business_id', req.params.businessId)
@@ -22,71 +21,198 @@ const listFloorTables = asyncHandler(async (req, res) => {
     .eq('voided', false)
     .neq('status', 'awaiting_payment')
     .neq('status', 'cancelled')
-    .neq('status', 'completed');
+    .neq('status', 'completed')
+    .in('card_id', connectedCardIds) : { data: [] };
 
   const ordersByCard = new Map();
   for (const o of orders || []) {
-    if (!o.card_id) continue;
     const list = ordersByCard.get(o.card_id) || [];
     list.push(o);
     ordersByCard.set(o.card_id, list);
   }
 
-  const tables = (cards || []).map((c) => ({
-    ...c,
-    activeOrders: ordersByCard.get(c.id) || [],
-  }));
-  res.json(tables);
+  const result = tables.map((t) => {
+    const card = t.cards?.[0] || null;
+    return {
+      id: t.id,
+      label: t.label,
+      seatCount: t.seat_count,
+      status: t.status,
+      mergedWithTableId: t.merged_with_table_id,
+      card: card ? { id: card.id, uid: card.uid, status: card.status } : null,
+      activeOrders: card ? (ordersByCard.get(card.id) || []) : [],
+    };
+  });
+  res.json(result);
 });
 
-// @route PATCH /api/businesses/:businessId/tables-floor/:cardId
-// Body: { tableStatus?, seatCount? }
-const updateTableStatus = asyncHandler(async (req, res) => {
-  const { tableStatus, seatCount } = req.body;
-  const update = {};
-  if (tableStatus !== undefined) update.table_status = tableStatus;
+// @route POST /api/businesses/:businessId/tables
+const createTable = asyncHandler(async (req, res) => {
+  const { label, seatCount = 2 } = req.body;
+  if (!label?.trim()) return res.status(400).json({ message: 'A table name/number is required' });
+
+  const { data, error } = await req.supabase
+    .from('tables')
+    .insert({ business_id: req.params.businessId, label: label.trim(), seat_count: seatCount })
+    .select()
+    .single();
+  if (error) {
+    if (error.code === '23505') return res.status(400).json({ message: `A table named "${label.trim()}" already exists` });
+    return res.status(400).json({ message: error.message });
+  }
+  res.status(201).json(data);
+});
+
+// @route PATCH /api/businesses/:businessId/tables/:tableId
+// Body: { label?, seatCount?, status? }
+const updateTable = asyncHandler(async (req, res) => {
+  const { label, seatCount, status } = req.body;
+  const update = { updated_at: new Date().toISOString() };
+  if (label !== undefined) update.label = label.trim();
   if (seatCount !== undefined) update.seat_count = seatCount;
+  if (status !== undefined) update.status = status;
 
   const { data, error } = await req.supabase
-    .from('cards')
+    .from('tables')
     .update(update)
-    .eq('id', req.params.cardId)
+    .eq('id', req.params.tableId)
     .eq('business_id', req.params.businessId)
     .select()
     .single();
-  if (error) return res.status(400).json({ message: error.message });
+  if (error || !data) return res.status(404).json({ message: 'Table not found' });
   res.json(data);
 });
 
-// @route POST /api/businesses/:businessId/tables-floor/:cardId/merge
-// Body: { mergeWithCardId }
-// Marks `cardId` as merged into `mergeWithCardId` - a bigger party
-// spanning two physical tables now reads as one group on the floor plan.
+// @route DELETE /api/businesses/:businessId/tables/:tableId
+// Real, deliberate guard: refuses to delete a table with a currently
+// active, unpaid order on it - deleting it would silently orphan real
+// money owed. Its connected card (if any) is unlinked automatically via
+// the foreign key's own "on delete set null" - the card itself isn't
+// touched, it's just free to be connected to a different table.
+const deleteTable = asyncHandler(async (req, res) => {
+  const { data: table } = await req.supabase.from('tables').select('id').eq('id', req.params.tableId).eq('business_id', req.params.businessId).maybeSingle();
+  if (!table) return res.status(404).json({ message: 'Table not found' });
+
+  const { data: card } = await req.supabase.from('cards').select('id').eq('table_id', table.id).maybeSingle();
+  if (card) {
+    const { data: activeOrders } = await req.supabase
+      .from('orders')
+      .select('id')
+      .eq('card_id', card.id)
+      .eq('voided', false)
+      .neq('status', 'completed')
+      .neq('status', 'cancelled')
+      .limit(1);
+    if (activeOrders && activeOrders.length > 0) {
+      return res.status(400).json({ message: 'This table has an active order - settle or clear it before deleting the table' });
+    }
+  }
+
+  await req.supabase.from('tables').delete().eq('id', req.params.tableId).eq('business_id', req.params.businessId);
+  res.json({ message: 'Table deleted' });
+});
+
+// @route POST /api/businesses/:businessId/tables/:tableId/connect-card
+// Body: { cardId }
+// The actual "wire an NFC stand to a table" action. Disconnects the card
+// from any OTHER table it was previously on first - a card only ever
+// represents one physical table at a time, never two simultaneously.
+const connectCard = asyncHandler(async (req, res) => {
+  const { cardId } = req.body;
+  if (!cardId) return res.status(400).json({ message: 'cardId is required' });
+
+  const { data: card } = await req.supabase
+    .from('cards')
+    .select('id, linked_user_id, status, room_id')
+    .eq('id', cardId)
+    .eq('business_id', req.params.businessId)
+    .maybeSingle();
+  if (!card) return res.status(404).json({ message: 'Card not found for this business' });
+  if (card.linked_user_id) return res.status(400).json({ message: 'That card is a staff login card, not a table stand' });
+  if (card.room_id) return res.status(400).json({ message: 'That card is already connected to a hotel room' });
+  if (card.status !== 'active') return res.status(400).json({ message: 'That card is not active' });
+
+  const { data: table } = await req.supabase.from('tables').select('id, label, merged_with_table_id').eq('id', req.params.tableId).eq('business_id', req.params.businessId).maybeSingle();
+  if (!table) return res.status(404).json({ message: 'Table not found' });
+
+  const update = { table_id: table.id, label: table.label };
+  // Real sync: if this table is already merged into another one, the
+  // newly-connected card needs to inherit that merge immediately, not
+  // leave the table showing merged while the actual NFC session isn't.
+  if (table.merged_with_table_id) {
+    const { data: targetCard } = await req.supabase.from('cards').select('id').eq('table_id', table.merged_with_table_id).maybeSingle();
+    if (targetCard) update.merged_with_card_id = targetCard.id;
+  }
+  await req.supabase.from('cards').update(update).eq('id', cardId);
+  res.json({ message: `Card connected to ${table.label}` });
+});
+
+// @route POST /api/businesses/:businessId/tables/:tableId/disconnect-card
+// Real fix for the actual point of this whole redesign: a lost or
+// damaged NFC stand no longer means losing the table - this just frees
+// the table to have a different (or replacement) card connected next,
+// with the table's own identity, status, and history untouched.
+const disconnectCard = asyncHandler(async (req, res) => {
+  const { error } = await req.supabase
+    .from('cards')
+    .update({ table_id: null, merged_with_card_id: null })
+    .eq('table_id', req.params.tableId)
+    .eq('business_id', req.params.businessId);
+  if (error) return res.status(400).json({ message: error.message });
+  res.json({ message: 'Card disconnected - the table is unchanged and ready for a new card' });
+});
+
+// @route POST /api/businesses/:businessId/tables/:tableId/merge
+// Body: { mergeWithTableId }
 const mergeTables = asyncHandler(async (req, res) => {
-  const { mergeWithCardId } = req.body;
-  if (!mergeWithCardId) return res.status(400).json({ message: 'mergeWithCardId is required' });
+  const { mergeWithTableId } = req.body;
+  if (!mergeWithTableId) return res.status(400).json({ message: 'mergeWithTableId is required' });
 
   const { data, error } = await req.supabase
-    .from('cards')
-    .update({ merged_with_card_id: mergeWithCardId, table_status: 'occupied' })
-    .eq('id', req.params.cardId)
+    .from('tables')
+    .update({ merged_with_table_id: mergeWithTableId, status: 'occupied' })
+    .eq('id', req.params.tableId)
     .eq('business_id', req.params.businessId)
     .select()
     .single();
   if (error) return res.status(400).json({ message: error.message });
+
+  // Real sync, not just a floor-plan label - a merge only actually
+  // combines the two tables' NFC sessions (so a tap on either stand
+  // resolves to the same effective card, see publicController.js) if
+  // both currently have a card connected. If either doesn't yet, the
+  // table-level merge above still succeeds on its own - a real, valid
+  // state - it just has no card-level effect to apply until one is.
+  const [{ data: fromCard }, { data: toCard }] = await Promise.all([
+    req.supabase.from('cards').select('id').eq('table_id', req.params.tableId).maybeSingle(),
+    req.supabase.from('cards').select('id').eq('table_id', mergeWithTableId).maybeSingle(),
+  ]);
+  if (fromCard && toCard) {
+    await req.supabase.from('cards').update({ merged_with_card_id: toCard.id }).eq('id', fromCard.id);
+  }
+
   res.json(data);
 });
 
-// @route POST /api/businesses/:businessId/tables-floor/:cardId/unmerge
+// @route POST /api/businesses/:businessId/tables/:tableId/unmerge
 const unmergeTable = asyncHandler(async (req, res) => {
   const { data, error } = await req.supabase
-    .from('cards')
-    .update({ merged_with_card_id: null })
-    .eq('id', req.params.cardId)
+    .from('tables')
+    .update({ merged_with_table_id: null })
+    .eq('id', req.params.tableId)
     .eq('business_id', req.params.businessId)
     .select()
     .single();
   if (error) return res.status(400).json({ message: error.message });
+
+  // Same real sync in reverse - clears the card-level merge too, so an
+  // unmerged table's stand genuinely goes back to operating as its own
+  // independent session, not just looking unmerged on the floor plan.
+  const { data: card } = await req.supabase.from('cards').select('id').eq('table_id', req.params.tableId).maybeSingle();
+  if (card) {
+    await req.supabase.from('cards').update({ merged_with_card_id: null }).eq('id', card.id);
+  }
+
   res.json(data);
 });
 
@@ -119,18 +245,19 @@ const addToWaitlist = asyncHandler(async (req, res) => {
 });
 
 // @route POST /api/businesses/:businessId/waitlist/:entryId/seat
-// Body: { cardId } - the table this party is being seated at. Marks the
+// Body: { tableId } - the table this party is being seated at. Marks the
 // table occupied in the same motion, so hosts never seat a party and
 // forget to update the floor plan as two separate steps.
 const seatWaitlistEntry = asyncHandler(async (req, res) => {
-  const { cardId } = req.body;
-  if (!cardId) return res.status(400).json({ message: 'cardId is required' });
+  const { tableId } = req.body;
+  if (!tableId) return res.status(400).json({ message: 'tableId is required' });
 
-  await req.supabase.from('cards').update({ table_status: 'occupied' }).eq('id', cardId).eq('business_id', req.params.businessId);
+  await req.supabase.from('tables').update({ status: 'occupied' }).eq('id', tableId).eq('business_id', req.params.businessId);
+  const { data: card } = await req.supabase.from('cards').select('id').eq('table_id', tableId).maybeSingle();
 
   const { data, error } = await req.supabase
     .from('waitlist_entries')
-    .update({ status: 'seated', seated_card_id: cardId, seated_at: new Date().toISOString() })
+    .update({ status: 'seated', seated_card_id: card?.id || null, seated_at: new Date().toISOString() })
     .eq('id', req.params.entryId)
     .eq('business_id', req.params.businessId)
     .select()
@@ -153,6 +280,6 @@ const cancelWaitlistEntry = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  listFloorTables, updateTableStatus, mergeTables, unmergeTable,
+  listTables, createTable, updateTable, deleteTable, connectCard, disconnectCard, mergeTables, unmergeTable,
   listWaitlist, addToWaitlist, seatWaitlistEntry, cancelWaitlistEntry,
 };

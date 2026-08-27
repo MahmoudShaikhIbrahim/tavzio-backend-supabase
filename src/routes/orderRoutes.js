@@ -1,7 +1,7 @@
 const express = require('express');
 const {
   listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, listRequests, dismissRequest,
-  recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse,
+  recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse, assignTable,
 } = require('../controllers/orderController');
 const { reprintKitchenTicket } = require('../controllers/kitchenPrinterController');
 const { exportOrders } = require('../controllers/exportController');
@@ -26,6 +26,7 @@ router.post('/:orderId/items/:itemId/void', voidOrderItem);
 router.post('/:orderId/manual-payment', recordManualPayment);
 router.post('/:orderId/ready-ack', ackOrderReady);
 router.post('/:orderId/fire-course', fireCourse);
+router.patch('/:orderId/assign-table', assignTable);
 router.post('/:orderId/reprint-ticket', reprintKitchenTicket);
 
 module.exports = router;

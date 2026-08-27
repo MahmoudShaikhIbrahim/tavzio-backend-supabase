@@ -386,7 +386,7 @@ const placeStaffOrder = asyncHandler(async (req, res) => {
 const ORDER_TYPE_LABELS = { dine_in: 'Dine-in', walk_in: 'Walk-in', pickup: 'Pickup', delivery: 'Delivery' };
 
 const createPosOrder = asyncHandler(async (req, res) => {
-  const { orderType = 'walk_in', items, note = '', chargeToFolioId, discountType, discountValue, discountReason } = req.body;
+  const { orderType = 'walk_in', items, note = '', chargeToFolioId, discountType, discountValue, discountReason, tableId } = req.body;
   let { tableLabel } = req.body;
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ message: 'At least one item is required' });
@@ -408,6 +408,27 @@ const createPosOrder = asyncHandler(async (req, res) => {
     const { data: folio } = await req.supabase.from('hotel_folios').select('status').eq('id', chargeToFolioId).eq('business_id', req.params.businessId).single();
     if (!folio) return res.status(404).json({ message: 'Folio not found' });
     if (folio.status === 'closed') return res.status(400).json({ message: 'This folio is closed - cannot charge to it' });
+  }
+
+  // Real fix: tableId now refers to the real, independent table entity,
+  // not a card directly - a table can genuinely have no card connected
+  // yet (freshly created, or its old card was lost and hasn't been
+  // replaced), and the order still needs to work correctly either way,
+  // just without a card_id yet. Once a card IS connected later, that's
+  // handled by the connect-card endpoint updating the card itself, not
+  // by anything here.
+  let resolvedCardId = null;
+  if (orderType === 'dine_in' && tableId) {
+    const { data: table } = await req.supabase
+      .from('tables')
+      .select('id, label, cards(id, status, linked_user_id)')
+      .eq('id', tableId)
+      .eq('business_id', req.params.businessId)
+      .maybeSingle();
+    if (!table) return res.status(404).json({ message: 'That table was not found for this business' });
+    const card = table.cards?.[0];
+    if (card && !card.linked_user_id && card.status === 'active') resolvedCardId = card.id;
+    if (!tableLabel?.trim()) tableLabel = table.label;
   }
 
   // Real fix for the grouping-collision bug: if the client left the
@@ -530,7 +551,7 @@ const createPosOrder = asyncHandler(async (req, res) => {
     .from('orders')
     .insert({
       business_id: req.params.businessId,
-      card_id: null,
+      card_id: resolvedCardId,
       table_label: tableLabel,
       order_type: orderType,
       note,
@@ -838,4 +859,37 @@ const fireCourse = asyncHandler(async (req, res) => {
   res.json({ message: `Fired ${data.length} item(s)`, items: data });
 });
 
-module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, listRequests, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse };
+// @route PATCH /api/businesses/:businessId/orders/:orderId/assign-table
+// Real fix for the confirmed request: a walk-in customer who decides to
+// sit down, or a dine-in party that moved tables, needs a way to attach
+// (or re-attach) an existing order to a real table card - without this,
+// staff would have to void the order and recreate it from scratch just
+// to change which table it belongs to. Same strict validation as order
+// creation: a real, active, non-admin card belonging to this business,
+// never accepted unvalidated.
+const assignTable = asyncHandler(async (req, res) => {
+  const { tableId } = req.body;
+  if (!tableId) return res.status(400).json({ message: 'tableId is required' });
+
+  const { data: table } = await req.supabase
+    .from('tables')
+    .select('id, label, cards(id, status, linked_user_id)')
+    .eq('id', tableId)
+    .eq('business_id', req.params.businessId)
+    .maybeSingle();
+  if (!table) return res.status(404).json({ message: 'That table was not found for this business' });
+  const card = table.cards?.[0];
+  const resolvedCardId = card && !card.linked_user_id && card.status === 'active' ? card.id : null;
+
+  const { data: order, error } = await req.supabase
+    .from('orders')
+    .update({ order_type: 'dine_in', card_id: resolvedCardId, table_label: table.label })
+    .eq('id', req.params.orderId)
+    .eq('business_id', req.params.businessId)
+    .select()
+    .single();
+  if (error || !order) return res.status(404).json({ message: 'Order not found' });
+  res.json(order);
+});
+
+module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, listRequests, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse, assignTable };

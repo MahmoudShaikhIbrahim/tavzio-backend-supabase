@@ -341,6 +341,8 @@ const sendContract = asyncHandler(async (req, res) => {
   res.json({ message: `Sent to ${email}` });
 });
 
+const { computeNextBillingDate, EXPIRY_WARNING_DAYS } = require('../utils/contractBillingCheck');
+
 const listContracts = asyncHandler(async (req, res) => {
   const { data, error } = await req.supabase
     .from('contracts')
@@ -348,7 +350,26 @@ const listContracts = asyncHandler(async (req, res) => {
     .eq('business_id', req.params.businessId)
     .order('created_at', { ascending: false });
   if (error) return res.status(400).json({ message: error.message });
-  res.json(data);
+
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  const withCountdown = data.map((c) => {
+    if (!['active', 'paid'].includes(c.status)) return { ...c, countdown: null };
+    const nextBilling = computeNextBillingDate(c, today);
+    const daysToBilling = Math.round((nextBilling.getTime() - today.getTime()) / 86400000);
+    const endDate = new Date(`${c.end_date}T00:00:00Z`);
+    const daysToExpiry = Math.round((endDate.getTime() - today.getTime()) / 86400000);
+    return {
+      ...c,
+      countdown: {
+        nextBillingDate: nextBilling.toISOString().slice(0, 10),
+        daysToBilling,
+        daysToExpiry,
+        expiryWarningDays: EXPIRY_WARNING_DAYS[c.payment_frequency] || 30,
+      },
+    };
+  });
+  res.json(withCountdown);
 });
 
 function formatLongDate(d) {

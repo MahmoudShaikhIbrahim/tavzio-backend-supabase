@@ -142,12 +142,6 @@ function sendSupplierOrderEmail({ supplierEmail, supplierName, businessName, bus
     text,
     from: supplyFromAddress(businessName),
     replyTo: businessEmail || undefined,
-    // A real copy in the business's own inbox - the one thing no From
-    // address, however well it's framed, could ever provide on its
-    // own. Nothing else about the flow needs businessEmail to be set
-    // for this to work at all - if it's missing, this and replyTo both
-    // simply don't apply, the order still sends.
-    bcc: businessEmail || undefined,
   });
 }
 
