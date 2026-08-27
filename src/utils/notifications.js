@@ -145,6 +145,39 @@ function sendSupplierOrderEmail({ supplierEmail, supplierName, businessName, bus
   });
 }
 
+// Real, distinct from sendSupplierOrderEmail above (that one places the
+// order; this one follows up on a short shipment) - sent every time a
+// receive event doesn't fully complete every line, so the supplier has
+// a clear, itemized record of exactly what arrived and what's still
+// owed, without the business having to write this by hand each time.
+function sendSupplierPartialReceiveEmail({ supplierEmail, supplierName, businessName, businessEmail, poNumber, receivedNow, stillMissing }) {
+  const receivedLines = receivedNow.map((i) => `  - ${i.quantity} ${i.unit} × ${i.name}`);
+  const missingLines = stillMissing.map((i) => `  - ${i.quantity} ${i.unit} × ${i.name}`);
+  const text = [
+    `Hi${supplierName ? ` ${supplierName}` : ''},`,
+    '',
+    `${businessName} has received a partial delivery for order${poNumber ? ` PO ${poNumber}` : ''}.`,
+    '',
+    'Received this delivery:',
+    ...receivedLines,
+    '',
+    missingLines.length > 0 ? 'Still outstanding on this order:' : '',
+    ...missingLines,
+    '',
+    `Please let us know when the remaining items will be delivered.`,
+    '',
+    `- ${businessName} (sent via Tavzio)`,
+  ].filter(Boolean).join('\n');
+
+  return sendViaResend({
+    to: supplierEmail,
+    subject: `Partial delivery received - ${businessName}${poNumber ? ` PO ${poNumber}` : ''}`,
+    text,
+    from: supplyFromAddress(businessName),
+    replyTo: businessEmail || undefined,
+  });
+}
+
 function sendContractSignLink({ email, businessName, signUrl }) {
   return sendMail({
     to: email,
@@ -348,7 +381,7 @@ async function sendCampaignEmail({ to, subject, text }) {
 }
 
 module.exports = {
-  notifyCardUsed, sendDeviceConfirmation, sendMail, sendSupplierOrderEmail,
+  notifyCardUsed, sendDeviceConfirmation, sendMail, sendSupplierOrderEmail, sendSupplierPartialReceiveEmail,
   sendContractSignLink, sendSignedContractCopy, sendContractSignedReceipt, sendPaymentFailedWarning, sendAccountSuspended, sendContractTerminated,
   sendNewInviteEmail, resendInviteEmail, sendCampaignEmail,
 };

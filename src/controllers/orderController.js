@@ -69,7 +69,7 @@ const listRequests = asyncHandler(async (req, res) => {
   // this merge.
   const { data: guestRequests, error: guestError } = await req.supabase
     .from('guest_service_requests')
-    .select('id, room_id, request_type, note, status, created_at, hotel_rooms(room_number)')
+    .select('id, room_id, request_type, note, status, created_at, target_section, hotel_rooms(room_number)')
     .eq('business_id', req.params.businessId)
     .order('created_at', { ascending: false })
     .limit(50);
@@ -83,7 +83,7 @@ const listRequests = asyncHandler(async (req, res) => {
     table_label: r.hotel_rooms?.room_number ? `Room ${r.hotel_rooms.room_number}` : 'Front Desk',
     request_type: 'custom',
     custom_request_label: `${r.request_type.replace(/_/g, ' ')}${r.note ? ' - ' + r.note : ''}`,
-    target_section: null,
+    target_section: r.target_section,
     // guest_service_requests uses 'done'; orders uses 'completed' - the
     // frontend's active/completed filter only knows 'completed', so this
     // is normalized here rather than teaching the frontend a second
@@ -232,6 +232,20 @@ const voidOrderItem = asyncHandler(async (req, res) => {
     .single();
   if (error || !item) return res.status(404).json({ message: 'Item not found' });
 
+  // Real fix for a confirmed bug: this order's own stored total was
+  // never recalculated after voiding just one item out of several -
+  // it kept reflecting the pre-void amount even though the voided
+  // item correctly disappeared from every item list that filters on
+  // voided=false, causing the table's displayed total to silently
+  // include money for an item nobody could even see anymore.
+  const { data: siblings } = await supabaseAdmin
+    .from('order_items')
+    .select('unit_price, addon_total, quantity, paid, voided')
+    .eq('order_id', req.params.orderId);
+  const liveItems = (siblings || []).filter((i) => !i.voided);
+  const recalculatedTotal = liveItems.reduce((sum, i) => sum + (i.unit_price + i.addon_total) * i.quantity, 0);
+  await supabaseAdmin.from('orders').update({ total: recalculatedTotal }).eq('id', req.params.orderId);
+
   // If that was the last live item on this order (everything else is
   // either already paid or already voided too), the order itself is now
   // an empty shell with nothing left to deliver or collect. Without this,
@@ -239,11 +253,7 @@ const voidOrderItem = asyncHandler(async (req, res) => {
   // with no way to make it go away - Clear table's own "nothing
   // outstanding" check treated it the same as a fully-paid order and
   // silently skipped it every time.
-  const { data: siblings } = await supabaseAdmin
-    .from('order_items')
-    .select('paid, voided')
-    .eq('order_id', req.params.orderId);
-  const stillHasLiveItems = (siblings || []).some((i) => !i.paid && !i.voided);
+  const stillHasLiveItems = liveItems.some((i) => !i.paid);
   const hasAnyPaidItems = (siblings || []).some((i) => i.paid);
   if (!stillHasLiveItems && !hasAnyPaidItems) {
     await supabaseAdmin.from('orders').update({ voided: true }).eq('id', req.params.orderId);

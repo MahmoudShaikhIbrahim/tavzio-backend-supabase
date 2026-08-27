@@ -5,7 +5,7 @@ const {
   recordWaste, getWasteReport, getLowStock, getValuation,
   getMenuItemFoodCost, getActualFoodCost,
   getRecipe, setRecipe,
-  listPurchaseOrders, createPurchaseOrder, receivePurchaseOrder,
+  listPurchaseOrders, createPurchaseOrder, receivePurchaseOrder, listPurchaseOrderReceipts,
 } = require('../controllers/inventoryController');
 const { protect, enforceTenant } = require('../middleware/auth');
 
@@ -37,5 +37,6 @@ router.put('/menu-items/:menuItemId/recipe', setRecipe);
 router.get('/purchase-orders', listPurchaseOrders);
 router.post('/purchase-orders', createPurchaseOrder);
 router.post('/purchase-orders/:poId/receive', receivePurchaseOrder);
+router.get('/purchase-orders/:poId/receipts', listPurchaseOrderReceipts);
 
 module.exports = router;

@@ -1,6 +1,6 @@
 const asyncHandler = require('../utils/asyncHandler');
 const { supabaseAdmin } = require('../config/supabaseClient');
-const { sendSupplierOrderEmail } = require('../utils/notifications');
+const { sendSupplierOrderEmail, sendSupplierPartialReceiveEmail } = require('../utils/notifications');
 
 // --- Suppliers ---
 const listSuppliers = asyncHandler(async (req, res) => {
@@ -566,7 +566,7 @@ const receivePurchaseOrder = asyncHandler(async (req, res) => {
 
   const { data: po } = await req.supabase
     .from('purchase_orders')
-    .select('*, purchase_order_items(*)')
+    .select('*, suppliers(id, name, email), purchase_order_items(*)')
     .eq('id', req.params.poId)
     .eq('business_id', req.params.businessId)
     .single();
@@ -576,6 +576,11 @@ const receivePurchaseOrder = asyncHandler(async (req, res) => {
 
   const receivedMap = new Map((receivedItems || []).map((r) => [r.purchaseOrderItemId, Number(r.receivedQuantity)]));
 
+  // Real, itemized record of exactly what happened in THIS receive
+  // event - what actually moved just now, and what's still owed on
+  // each line afterward. Feeds both the permanent log (the explicit
+  // "proof" ask) and, if this receive is partial, the supplier email.
+  const receiptLogItems = [];
   let allLinesComplete = true;
   for (const item of po.purchase_order_items) {
     const alreadyReceived = Number(item.received_quantity || 0);
@@ -606,6 +611,13 @@ const receivePurchaseOrder = asyncHandler(async (req, res) => {
       purchase_order_id: po.id,
       created_by: req.user.id,
     });
+    receiptLogItems.push({
+      ingredientId: item.ingredient_id,
+      name: ingredient.name,
+      unit: ingredient.unit,
+      receivedNow: receivingNow,
+      stillMissing: remaining - receivingNow,
+    });
   }
 
   const newStatus = allLinesComplete ? 'received' : 'partially_received';
@@ -616,7 +628,57 @@ const receivePurchaseOrder = asyncHandler(async (req, res) => {
     .select('*, suppliers(name), purchase_order_items(*, ingredients(name, unit))')
     .single();
   if (error) return res.status(400).json({ message: error.message });
+
+  // Real, timestamped proof of this specific receive event - not
+  // reconstructed later from purchase_order_items' current (mutable)
+  // received_quantity, which keeps changing across multiple partials.
+  await supabaseAdmin.from('purchase_order_receipts').insert({
+    business_id: req.params.businessId,
+    purchase_order_id: po.id,
+    received_by: req.user.id,
+    is_partial: newStatus === 'partially_received',
+    items: receiptLogItems,
+  });
+
+  // Real, itemized follow-up to the supplier whenever this receive
+  // didn't fully complete every line - not fired-and-forgotten before
+  // responding, same non-blocking pattern as the order-placement email.
+  if (newStatus === 'partially_received' && po.suppliers?.email) {
+    const receivedNow = receiptLogItems.filter((i) => i.receivedNow > 0).map((i) => ({ name: i.name, unit: i.unit, quantity: i.receivedNow }));
+    const stillMissing = receiptLogItems.filter((i) => i.stillMissing > 0).map((i) => ({ name: i.name, unit: i.unit, quantity: i.stillMissing }));
+    const { data: business } = await supabaseAdmin.from('businesses').select('name, owner').eq('id', req.params.businessId).single();
+    let businessEmail;
+    if (business?.owner) {
+      const { data: ownerUser } = await supabaseAdmin.auth.admin.getUserById(business.owner);
+      businessEmail = ownerUser?.user?.email;
+    }
+    sendSupplierPartialReceiveEmail({
+      supplierEmail: po.suppliers.email,
+      supplierName: po.suppliers.name,
+      businessName: business?.name || 'A Tavzio business',
+      businessEmail,
+      poNumber: po.id.slice(0, 8).toUpperCase(),
+      receivedNow,
+      stillMissing,
+    }).catch((err) => console.error('Partial receive email failed:', err.message));
+  }
+
   res.json(updated);
+});
+
+// @route GET /api/businesses/:businessId/purchase-orders/:poId/receipts
+// The real, timestamped proof of every receive event on this order -
+// each one permanent and unaffected by later partial receives changing
+// purchase_order_items' current received_quantity.
+const listPurchaseOrderReceipts = asyncHandler(async (req, res) => {
+  const { data, error } = await req.supabase
+    .from('purchase_order_receipts')
+    .select('*, profiles(name)')
+    .eq('purchase_order_id', req.params.poId)
+    .eq('business_id', req.params.businessId)
+    .order('created_at', { ascending: false });
+  if (error) return res.status(400).json({ message: error.message });
+  res.json(data);
 });
 
 module.exports = {
@@ -625,5 +687,5 @@ module.exports = {
   recordWaste, getWasteReport, getLowStock, getValuation,
   getMenuItemFoodCost, getActualFoodCost,
   getRecipe, setRecipe,
-  listPurchaseOrders, createPurchaseOrder, receivePurchaseOrder,
+  listPurchaseOrders, createPurchaseOrder, receivePurchaseOrder, listPurchaseOrderReceipts,
 };

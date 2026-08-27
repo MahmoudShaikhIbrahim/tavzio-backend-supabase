@@ -2,6 +2,7 @@ const express = require('express');
 const { protect, authorize } = require('../middleware/auth');
 const {
   listDemoMenuItems, createDemoMenuItem, updateDemoMenuItem, deleteDemoMenuItem, importFromBusiness,
+  getDemoSettingsAdmin, updateDemoSettings,
 } = require('../controllers/demoAdminController');
 
 // Demo Settings is a super_admin-only concept - it's Tavzio's own
@@ -16,5 +17,7 @@ router.post('/menu-items', createDemoMenuItem);
 router.patch('/menu-items/:itemId', updateDemoMenuItem);
 router.delete('/menu-items/:itemId', deleteDemoMenuItem);
 router.post('/menu-items/import', importFromBusiness);
+router.get('/settings', getDemoSettingsAdmin);
+router.patch('/settings', updateDemoSettings);
 
 module.exports = router;

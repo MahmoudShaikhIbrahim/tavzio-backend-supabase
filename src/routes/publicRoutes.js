@@ -1,7 +1,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { submitLead } = require('../controllers/leadController');
-const { getDemoMenu, placeDemoOrder, getDemoOrders, markDemoOrderReady, payDemoOrder } = require('../controllers/demoController');
+const { getDemoMenu, placeDemoOrder, getDemoOrders, markDemoOrderReady, payDemoOrder, getDemoSettings, createDemoRequest, getDemoRequests, acknowledgeDemoRequest } = require('../controllers/demoController');
 const { getGuestPortal, submitGuestRequest, submitGuestOrder, getMyRequests } = require('../controllers/hotelGuestPortalController');
 const { listPublicOutlets } = require('../controllers/hotelOutletsController');
 const { submitCustomButtonRequest } = require('../controllers/customButtonController');
@@ -93,6 +93,10 @@ router.post('/demo/orders', placeDemoOrder);
 router.get('/demo/orders', getDemoOrders);
 router.patch('/demo/orders/:orderId/ready', markDemoOrderReady);
 router.post('/demo/orders/:orderId/pay', payDemoOrder);
+router.get('/demo/settings', getDemoSettings);
+router.post('/demo/requests', createDemoRequest);
+router.get('/demo/requests', getDemoRequests);
+router.patch('/demo/requests/:requestId/acknowledge', acknowledgeDemoRequest);
 
 // Online booking - a dedicated, much stricter limiter on the OTP
 // request route specifically: unlike the general 60/min publicLimiter

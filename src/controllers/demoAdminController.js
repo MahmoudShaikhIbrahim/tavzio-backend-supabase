@@ -93,4 +93,23 @@ const importFromBusiness = asyncHandler(async (req, res) => {
   res.status(201).json({ message: `Imported ${inserted.length} item(s) as independent demo copies`, items: inserted });
 });
 
-module.exports = { listDemoMenuItems, createDemoMenuItem, updateDemoMenuItem, deleteDemoMenuItem, importFromBusiness };
+// @route GET /api/admin/demo/settings
+const getDemoSettingsAdmin = asyncHandler(async (req, res) => {
+  const { data, error } = await req.supabase.from('demo_settings').select('*').eq('id', 1).single();
+  if (error) return res.status(400).json({ message: error.message });
+  res.json(data);
+});
+
+// @route PATCH /api/admin/demo/settings
+const updateDemoSettings = asyncHandler(async (req, res) => {
+  const { businessName, coverImageUrl } = req.body;
+  const update = { updated_at: new Date().toISOString() };
+  if (businessName !== undefined) update.business_name = businessName;
+  if (coverImageUrl !== undefined) update.cover_image_url = coverImageUrl;
+
+  const { data, error } = await req.supabase.from('demo_settings').update(update).eq('id', 1).select().single();
+  if (error) return res.status(400).json({ message: error.message });
+  res.json(data);
+});
+
+module.exports = { listDemoMenuItems, createDemoMenuItem, updateDemoMenuItem, deleteDemoMenuItem, importFromBusiness, getDemoSettingsAdmin, updateDemoSettings };

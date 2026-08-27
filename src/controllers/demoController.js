@@ -123,4 +123,55 @@ const payDemoOrder = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
-module.exports = { getDemoMenu, placeDemoOrder, getDemoOrders, markDemoOrderReady, payDemoOrder };
+// @route GET /api/public/demo/settings
+// The real business identity for the demo phone - name and cover photo,
+// managed by super_admin (see demoAdminController.js), not hardcoded.
+const getDemoSettings = asyncHandler(async (req, res) => {
+  const { data, error } = await supabaseAdmin.from('demo_settings').select('business_name, cover_image_url').eq('id', 1).single();
+  if (error) return res.status(400).json({ message: error.message });
+  res.json(data);
+});
+
+// @route POST /api/public/demo/requests
+// Body: { sessionId, type: 'call_waiter' | 'request_bill' }
+// The real notification flow the demo was missing - mirrors the actual
+// product's Requests feature, not a simulated toast with nothing behind
+// it. Same sessionId scoping as demo_orders, so two people demoing at
+// once never see each other's fake requests.
+const createDemoRequest = asyncHandler(async (req, res) => {
+  const { sessionId, type } = req.body;
+  if (!sessionId || !['call_waiter', 'request_bill'].includes(type)) {
+    return res.status(400).json({ message: 'sessionId and a valid type are required' });
+  }
+  const { data, error } = await supabaseAdmin.from('demo_requests').insert({ session_id: sessionId, type }).select().single();
+  if (error) return res.status(400).json({ message: error.message });
+  res.status(201).json(data);
+});
+
+// @route GET /api/public/demo/requests?sessionId=...
+const getDemoRequests = asyncHandler(async (req, res) => {
+  const { sessionId } = req.query;
+  if (!sessionId) return res.status(400).json({ message: 'sessionId is required' });
+  const { data, error } = await supabaseAdmin
+    .from('demo_requests')
+    .select('id, type, status, created_at')
+    .eq('session_id', sessionId)
+    .order('created_at', { ascending: false })
+    .limit(20);
+  if (error) return res.status(400).json({ message: error.message });
+  res.json(data);
+});
+
+// @route PATCH /api/public/demo/requests/:requestId/acknowledge
+const acknowledgeDemoRequest = asyncHandler(async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from('demo_requests')
+    .update({ status: 'acknowledged' })
+    .eq('id', req.params.requestId)
+    .select()
+    .single();
+  if (error || !data) return res.status(404).json({ message: 'Request not found' });
+  res.json(data);
+});
+
+module.exports = { getDemoMenu, placeDemoOrder, getDemoOrders, markDemoOrderReady, payDemoOrder, getDemoSettings, createDemoRequest, getDemoRequests, acknowledgeDemoRequest };

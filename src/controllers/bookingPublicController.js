@@ -43,11 +43,23 @@ const getBookingConfig = asyncHandler(async (req, res) => {
     menu = items || [];
   }
 
+  // Real fix for the confirmed request: services (with their real
+  // options, like "with cake"/"without cake") are now genuinely
+  // selectable during booking - this data never existed on this
+  // endpoint before, so the customer-facing form had nothing to show.
+  const { data: services } = await supabaseAdmin
+    .from('services')
+    .select('id, name, description, price, duration_minutes, service_options(id, label, price_delta, sort_order)')
+    .eq('business_id', business.id)
+    .eq('is_available', true)
+    .order('sort_order');
+
   res.json({
     businessName: business.name,
     allowPreOrder: !!booking.allowPreOrder,
     downPayment: booking.downPayment || { enabled: false },
     menu,
+    services: services || [],
   });
 });
 
@@ -124,7 +136,7 @@ function computeDownPayment(downPaymentConfig, orderTotal) {
 // this is the real gate keeping an unverified booking from ever being
 // created at all, not a UI-only check the frontend could skip.
 const createPublicBooking = asyncHandler(async (req, res) => {
-  const { phone, guestName, partySize, requestedAt, note = '', items = [], foodReadyOffsetMinutes } = req.body;
+  const { phone, guestName, partySize, requestedAt, note = '', items = [], foodReadyOffsetMinutes, serviceId, serviceOptionId, serviceRequestedAt } = req.body;
   if (!phone || !guestName || !partySize || !requestedAt) {
     return res.status(400).json({ message: 'phone, guestName, partySize, and requestedAt are required' });
   }
@@ -172,7 +184,30 @@ const createPublicBooking = asyncHandler(async (req, res) => {
     }
   }
 
-  const downPaymentAmount = computeDownPayment(bookingConfig.downPayment, itemsTotal);
+  // Real fix for the confirmed request: a service (with a real,
+  // validated option, never trusted blindly from the client) can now
+  // genuinely be attached to a booking, with its own real price and
+  // its own real requested time - often different from the table
+  // reservation's own time.
+  let resolvedServiceId = null;
+  let resolvedServiceOptionId = null;
+  let serviceTotal = 0;
+  if (serviceId) {
+    const { data: service } = await supabaseAdmin.from('services').select('id, price, is_available').eq('id', serviceId).eq('business_id', business.id).maybeSingle();
+    if (!service || !service.is_available) return res.status(400).json({ message: 'That service is not available' });
+    if (!serviceRequestedAt) return res.status(400).json({ message: 'A time is required for the service you selected' });
+    resolvedServiceId = service.id;
+    serviceTotal = Number(service.price);
+
+    if (serviceOptionId) {
+      const { data: option } = await supabaseAdmin.from('service_options').select('id, price_delta').eq('id', serviceOptionId).eq('service_id', service.id).maybeSingle();
+      if (!option) return res.status(400).json({ message: 'That option is not valid for the selected service' });
+      resolvedServiceOptionId = option.id;
+      serviceTotal += Number(option.price_delta);
+    }
+  }
+  const totalDownPaymentBase = itemsTotal + serviceTotal;
+  const downPaymentAmount = computeDownPayment(bookingConfig.downPayment, totalDownPaymentBase);
 
   const { data: booking, error: bookingError } = await supabaseAdmin
     .from('bookings')
@@ -186,6 +221,9 @@ const createPublicBooking = asyncHandler(async (req, res) => {
       status: 'pending',
       customer_phone_verified: true,
       food_ready_offset_minutes: itemRows.length > 0 ? (foodReadyOffsetMinutes ?? 0) : null,
+      service_id: resolvedServiceId,
+      service_option_id: resolvedServiceOptionId,
+      service_requested_at: resolvedServiceId ? serviceRequestedAt : null,
       down_payment_required_aed: downPaymentAmount,
       down_payment_status: downPaymentAmount > 0 ? 'pending' : 'not_required',
     })

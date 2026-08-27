@@ -117,7 +117,7 @@ async function resolveRoomFromCard(cardId) {
 // the existing Requests list, tagged with whichever section (if any)
 // the owner assigned it to.
 const submitCustomButtonRequest = asyncHandler(async (req, res) => {
-  const { tapEventId } = req.body;
+  const { tapEventId, note = '' } = req.body;
   if (!tapEventId) return res.status(400).json({ message: 'tapEventId is required' });
 
   const { data: business } = await supabaseAdmin
@@ -195,7 +195,7 @@ const submitCustomButtonRequest = asyncHandler(async (req, res) => {
       note: '',
       total: 0,
       request_type: 'custom',
-      custom_request_label: button.label,
+      custom_request_label: note.trim() ? `${button.label}: ${note.trim()}` : button.label,
       target_section: button.target_section,
       // Explicit, not relying on the column default - same fix, same
       // reasoning, as publicController.js's submitOrder.

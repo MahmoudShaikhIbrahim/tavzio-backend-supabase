@@ -135,7 +135,7 @@ const getGuestPortal = asyncHandler(async (req, res) => {
 // list - a dedicated queue per department is a reasonable next step, but
 // every request submitted here is real and staff-visible today either way.
 const submitGuestRequest = asyncHandler(async (req, res) => {
-  const { requestType = 'other', note = '', quantity } = req.body;
+  const { requestType = 'other', note = '', quantity, targetSection } = req.body;
 
   const ctx = await resolveGuestContext(req.params.slug, req.params.roomId);
   if (!ctx) return res.status(404).json({ message: 'Not found' });
@@ -175,7 +175,7 @@ const submitGuestRequest = asyncHandler(async (req, res) => {
 
   const { data, error } = await supabaseAdmin
     .from('guest_service_requests')
-    .insert({ business_id: business.id, room_id: room?.id || null, reservation_id: reservation?.id || null, request_type: requestType, note: noteWithContext })
+    .insert({ business_id: business.id, room_id: room?.id || null, reservation_id: reservation?.id || null, request_type: requestType, note: noteWithContext, target_section: targetSection || null })
     .select()
     .single();
   if (error) return res.status(400).json({ message: error.message });
