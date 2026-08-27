@@ -1,9 +1,7 @@
 const PDFDocument = require('pdfkit');
 const asyncHandler = require('../utils/asyncHandler');
-const { createPaymentIntent, registerWebhook, verifyWebhookSignature, isFromZiinaIp } = require('../utils/ziinaAdapter');
 const { supabaseAdmin } = require('../config/supabaseClient');
 const { calculateVatExclusive, calculateVatInclusive } = require('../utils/vat');
-const { primaryClientUrl } = require('../utils/clientUrl');
 
 // @route GET /api/businesses/:businessId/receipts
 // Business owner/staff see their own; super_admin can view any business's
@@ -73,8 +71,6 @@ const createReceipt = asyncHandler(async (req, res) => {
 
   const receiptNumber = await nextReceiptNumber(req.supabase);
 
-  const { data: business } = await req.supabase.from('businesses').select('name').eq('id', req.params.businessId).single();
-
   const { data, error } = await req.supabase
     .from('receipts')
     .insert({
@@ -93,33 +89,7 @@ const createReceipt = asyncHandler(async (req, res) => {
     .single();
 
   if (error) return res.status(400).json({ message: error.message });
-
-  // The payment link is generated automatically, right now, for the
-  // exact receipt total - this is a best-effort step: if Ziina is
-  // unreachable or misconfigured, the receipt still exists and can be
-  // paid another way; it just won't have an automatic link yet.
-  const appUrl = primaryClientUrl();
-  const ziinaResult = await createPaymentIntent({
-    amountAed: amount,
-    message: `${business?.name || 'Tavzio'} - Receipt ${receiptNumber}`,
-    successUrl: `${appUrl}/admin/dashboard/receipts?paid=${data.id}`,
-    cancelUrl: `${appUrl}/admin/dashboard/receipts`,
-    failureUrl: `${appUrl}/admin/dashboard/receipts`,
-  });
-
-  if (ziinaResult.success) {
-    const { data: updated } = await req.supabase
-      .from('receipts')
-      .update({ ziina_payment_intent_id: ziinaResult.paymentIntentId, payment_link_url: ziinaResult.redirectUrl })
-      .eq('id', data.id)
-      .select()
-      .single();
-    return res.status(201).json(updated);
-  }
-
-  // Ziina failed - still return the successfully-created receipt, with a
-  // note so the super_admin caller knows the link wasn't generated.
-  res.status(201).json({ ...data, ziinaError: ziinaResult.error });
+  res.status(201).json(data);
 });
 
 // @route DELETE /api/businesses/:businessId/receipts/:receiptId
@@ -334,86 +304,6 @@ const updateReceiptBranding = asyncHandler(async (req, res) => {
   res.json(data);
 });
 
-// @route POST /api/ziina/webhook
-// The ONE account-wide receiver for every Ziina event, since Ziina only
-// supports a single webhook URL per account (confirmed from their own
-// docs) and this same account also serves Scripzio. Checks whether the
-// event belongs to a Tavzio receipt; if not, forwards it untouched to
-// Scripzio's real webhook so it keeps working exactly as before -
-// Tavzio adds one invisible hop, nothing else changes for Scripzio.
-async function handleZiinaWebhook(req, res) {
-  const signature = req.headers['x-hmac-signature'];
-  const remoteAddress = req.ip || req.connection?.remoteAddress;
-
-  if (!isFromZiinaIp(remoteAddress)) {
-    return res.status(401).json({ error: 'Untrusted source' });
-  }
-  if (!verifyWebhookSignature(req.rawBody, signature)) {
-    return res.status(401).json({ error: 'Invalid webhook signature' });
-  }
-
-  const { event, data } = req.body;
-  const paymentIntentId = data?.id;
-
-  if (event === 'payment_intent.status.updated' && paymentIntentId) {
-    const { data: receipt } = await supabaseAdmin
-      .from('receipts')
-      .select('id, payment_status')
-      .eq('ziina_payment_intent_id', paymentIntentId)
-      .maybeSingle();
-
-    if (receipt) {
-      // This event belongs to Tavzio - handle it here, don't forward it.
-      if (data.status === 'completed' && receipt.payment_status !== 'paid') {
-        await supabaseAdmin
-          .from('receipts')
-          .update({ payment_status: 'paid', paid_at: new Date().toISOString() })
-          .eq('id', receipt.id);
-      }
-      return res.status(200).json({ received: true });
-    }
-  }
-
-  // Not a Tavzio receipt (or not the event type Tavzio cares about) -
-  // forward the exact original request to Scripzio's real webhook,
-  // signature header included, so its own verification still passes.
-  const scripzioWebhookUrl = process.env.SCRIPZIO_ZIINA_WEBHOOK_URL;
-  if (scripzioWebhookUrl) {
-    try {
-      await fetch(scripzioWebhookUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(signature ? { 'X-Hmac-Signature': signature } : {}),
-        },
-        body: req.rawBody,
-      });
-    } catch (err) {
-      // Forwarding failure shouldn't surface as a Tavzio error to Ziina -
-      // Ziina retries failed deliveries on its own, and this failure is
-      // logged for whoever's watching the logs to notice.
-      console.error('Failed to forward Ziina webhook to Scripzio:', err.message);
-    }
-  }
-
-  res.status(200).json({ received: true });
-}
-
-// @route POST /api/ziina/register-webhook
-// super_admin only. Deliberately never called automatically - this
-// OVERWRITES whichever webhook URL is currently registered for the
-// whole Ziina account (confirmed: "any subsequent call overwrites the
-// webhook URL" per Ziina's own docs). A one-time, explicit action.
-const registerZiinaWebhook = asyncHandler(async (req, res) => {
-  const webhookUrl = `${process.env.PUBLIC_BASE_URL}/api/ziina/webhook`;
-  const secret = process.env.ZIINA_WEBHOOK_SECRET;
-  if (!secret) return res.status(400).json({ message: 'ZIINA_WEBHOOK_SECRET is not configured' });
-
-  const result = await registerWebhook(webhookUrl, secret);
-  if (!result.success) return res.status(502).json({ message: result.error });
-  res.json({ message: `Registered ${webhookUrl} as the account-wide Ziina webhook.` });
-});
-
 // @route POST /api/businesses/:businessId/contracts/:contractId/receipts/next
 // super_admin only. Generates the next installment receipt for a signed
 // contract automatically - amount, period label, and installment number
@@ -436,7 +326,6 @@ const generateContractReceipt = asyncHandler(async (req, res) => {
   }
 
   const perPayment = contract.annual_total_aed / periodsPerYear;
-  const { data: business } = await req.supabase.from('businesses').select('name').eq('id', req.params.businessId).single();
 
   const start = new Date(contract.start_date);
   const periodStart = new Date(start);
@@ -479,27 +368,7 @@ const generateContractReceipt = asyncHandler(async (req, res) => {
     .select()
     .single();
   if (error) return res.status(400).json({ message: error.message });
-
-  const appUrl = primaryClientUrl();
-  const ziinaResult = await createPaymentIntent({
-    amountAed: amountIncVat,
-    message: `${business?.name || 'Tavzio'} - Receipt ${receiptNumber}`,
-    successUrl: `${appUrl}/admin/dashboard/receipts?paid=${data.id}`,
-    cancelUrl: `${appUrl}/admin/dashboard/receipts`,
-    failureUrl: `${appUrl}/admin/dashboard/receipts`,
-  });
-
-  if (ziinaResult.success) {
-    const { data: updated } = await req.supabase
-      .from('receipts')
-      .update({ ziina_payment_intent_id: ziinaResult.paymentIntentId, payment_link_url: ziinaResult.redirectUrl })
-      .eq('id', data.id)
-      .select()
-      .single();
-    return res.status(201).json(updated);
-  }
-
-  res.status(201).json({ ...data, ziinaError: ziinaResult.error });
+  res.status(201).json(data);
 });
 
 module.exports = {
@@ -510,6 +379,4 @@ module.exports = {
   getReceiptPdf,
   getReceiptBranding,
   updateReceiptBranding,
-  handleZiinaWebhook,
-  registerZiinaWebhook,
 };

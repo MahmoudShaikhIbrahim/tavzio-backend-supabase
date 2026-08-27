@@ -28,10 +28,10 @@ const getNotificationCounts = asyncHandler(async (req, res) => {
     kitchenCount, housekeepingTaskCount, maintenanceTicketCount, housekeepingRequestCount, frontDeskRequestCount,
   ] = await Promise.all([
     supabaseAdmin.from('orders').select('id', { count: 'exact', head: true })
-      .eq('business_id', businessId).eq('request_type', 'order').eq('status', 'pending')
+      .eq('business_id', businessId).eq('request_type', 'order').eq('status', 'pending').eq('voided', false)
       .gte('created_at', ordersViewed),
     supabaseAdmin.from('orders').select('id', { count: 'exact', head: true })
-      .eq('business_id', businessId).neq('request_type', 'order').neq('status', 'completed')
+      .eq('business_id', businessId).neq('request_type', 'order').neq('status', 'completed').eq('voided', false)
       .gte('created_at', requestsViewed),
     // cash_pending has no created_at of its own (it's a flag on an
     // existing item, not a new row) - approximated via the order's
@@ -49,9 +49,12 @@ const getNotificationCounts = asyncHandler(async (req, res) => {
       .gte('created_at', paymentsViewed),
     // Kitchen deliberately mirrors the same "new pending order" signal
     // Orders already uses - same underlying event, just watched from a
-    // different screen.
+    // different screen. Must also match voided=false exactly like the
+    // real Kitchen page's own query (listOrders) - without it, an
+    // order created then immediately voided still counted here while
+    // genuinely showing zero pending orders on the actual page.
     supabaseAdmin.from('orders').select('id', { count: 'exact', head: true })
-      .eq('business_id', businessId).eq('request_type', 'order').eq('status', 'pending')
+      .eq('business_id', businessId).eq('request_type', 'order').eq('status', 'pending').eq('voided', false)
       .gte('created_at', kitchenViewed),
     supabaseAdmin.from('housekeeping_tasks').select('id', { count: 'exact', head: true })
       .eq('business_id', businessId).in('status', ['pending', 'in_progress'])
@@ -66,14 +69,14 @@ const getNotificationCounts = asyncHandler(async (req, res) => {
     // Housekeeping (as opposed to the dedicated housekeeping_task
     // destination, which is counted above) still needs to count here too.
     supabaseAdmin.from('orders').select('id', { count: 'exact', head: true })
-      .eq('business_id', businessId).eq('request_type', 'custom').eq('target_section', 'housekeeping').neq('status', 'completed')
+      .eq('business_id', businessId).eq('request_type', 'custom').eq('target_section', 'housekeeping').neq('status', 'completed').eq('voided', false)
       .gte('created_at', housekeepingViewed),
     // Front Desk's badge matches exactly what a front-desk-assigned
     // staff member actually sees in Requests: their own section, plus
     // anything left unrestricted (target_section null), same visibility
     // rule listRequests already enforces.
     supabaseAdmin.from('orders').select('id', { count: 'exact', head: true })
-      .eq('business_id', businessId).neq('request_type', 'order').neq('status', 'completed')
+      .eq('business_id', businessId).neq('request_type', 'order').neq('status', 'completed').eq('voided', false)
       .or('target_section.is.null,target_section.eq.front-desk')
       .gte('created_at', frontDeskViewed),
   ]);
