@@ -242,8 +242,10 @@ const voidOrderItem = asyncHandler(async (req, res) => {
     .from('order_items')
     .select('unit_price, addon_total, quantity, paid, voided')
     .eq('order_id', req.params.orderId);
+  const { data: orderRow } = await supabaseAdmin.from('orders').select('discount_amount_aed').eq('id', req.params.orderId).single();
   const liveItems = (siblings || []).filter((i) => !i.voided);
-  const recalculatedTotal = liveItems.reduce((sum, i) => sum + (i.unit_price + i.addon_total) * i.quantity, 0);
+  const newSubtotal = liveItems.reduce((sum, i) => sum + (i.unit_price + i.addon_total) * i.quantity, 0);
+  const recalculatedTotal = Math.max(0, newSubtotal - Number(orderRow?.discount_amount_aed || 0));
   await supabaseAdmin.from('orders').update({ total: recalculatedTotal }).eq('id', req.params.orderId);
 
   // If that was the last live item on this order (everything else is
