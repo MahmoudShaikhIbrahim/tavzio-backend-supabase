@@ -94,75 +94,6 @@ async function sendMail({ to, subject, text, replyTo }) {
   }
 }
 
-// Shared HTML shell for supplier-facing transactional emails. Kept
-// deliberately simple (table-based, inline styles only) because this
-// renders inside real inboxes (Gmail/Outlook/Apple Mail), not a
-// browser - no external stylesheet, no flexbox/grid, nothing that
-// depends on a modern CSS engine.
-function escapeHtml(str) {
-  return String(str ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
-function renderEmailHtml({ title, intro, rows, footerNote, signOff }) {
-  const rowsHtml = rows.map((section) => `
-    <tr>
-      <td style="padding:16px 0 6px;font:600 13px -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1a1a1a;">${escapeHtml(section.heading)}</td>
-    </tr>
-    <tr>
-      <td style="padding:0 0 4px;">
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
-          ${section.items.map((line, i) => `
-            <tr style="${i % 2 === 0 ? 'background:#f7f5f2;' : ''}">
-              <td style="padding:9px 12px;font:400 13px -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#3a3a3a;border-bottom:1px solid #eee;">${escapeHtml(line)}</td>
-            </tr>`).join('')}
-        </table>
-      </td>
-    </tr>`).join('');
-
-  return `<!doctype html>
-<html>
-  <body style="margin:0;padding:0;background:#f2efe9;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f2efe9;padding:24px 0;">
-      <tr>
-        <td align="center">
-          <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e7e2d8;">
-            <tr>
-              <td style="background:#1f1b16;padding:20px 24px;">
-                <span style="font:700 15px -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#d9b978;letter-spacing:0.4px;">TAVZIO</span>
-              </td>
-            </tr>
-            <tr>
-              <td style="padding:24px 24px 4px;">
-                <p style="margin:0 0 4px;font:700 18px -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1a1a1a;">${escapeHtml(title)}</p>
-                ${intro ? `<p style="margin:0;font:400 14px -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#555;">${escapeHtml(intro)}</p>` : ''}
-              </td>
-            </tr>
-            <tr>
-              <td style="padding:0 24px;">
-                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
-                  ${rowsHtml}
-                </table>
-              </td>
-            </tr>
-            ${footerNote ? `
-            <tr>
-              <td style="padding:6px 24px 0;">
-                <p style="margin:0;font:400 13px -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#555;">${escapeHtml(footerNote)}</p>
-              </td>
-            </tr>` : ''}
-            <tr>
-              <td style="padding:20px 24px 24px;">
-                <p style="margin:0;font:400 13px -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#8a8a8a;">${escapeHtml(signOff)}</p>
-              </td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    </table>
-  </body>
-</html>`;
-}
-
 function notifyCardUsed({ email, deviceLabel, businessName }) {
   return sendViaResend({
     to: email,
@@ -205,24 +136,10 @@ function sendSupplierOrderEmail({ supplierEmail, supplierName, businessName, bus
     `- ${businessName} (sent via Tavzio)`,
   ].filter(Boolean).join('\n');
 
-  const itemRows = items.map((i) => `${i.quantity} ${i.unit} \u00d7 ${i.name}${i.unitCostAed ? ` — AED ${i.unitCostAed.toFixed(2)} each` : ''}`);
-  const html = renderEmailHtml({
-    title: `New order from ${businessName}`,
-    intro: poNumber ? `Purchase order ${poNumber}` : undefined,
-    rows: [
-      { heading: 'Items requested', items: itemRows },
-      ...(totalAed ? [{ heading: 'Estimated total', items: [`AED ${totalAed.toFixed(2)}`] }] : []),
-      ...(notes ? [{ heading: `Note from ${businessName}`, items: [notes] }] : []),
-    ],
-    footerNote: 'Please reply to this email to confirm availability and delivery timing.',
-    signOff: `${businessName} — sent via Tavzio`,
-  });
-
   return sendViaResend({
     to: supplierEmail,
     subject: `New order from ${businessName}${poNumber ? ` - PO ${poNumber}` : ''}`,
     text,
-    html,
     from: supplyFromAddress(businessName),
     replyTo: businessEmail || undefined,
   });
@@ -252,24 +169,10 @@ function sendSupplierPartialReceiveEmail({ supplierEmail, supplierName, business
     `- ${businessName} (sent via Tavzio)`,
   ].filter(Boolean).join('\n');
 
-  const receivedRows = receivedNow.map((i) => `${i.quantity} ${i.unit} \u00d7 ${i.name}`);
-  const missingRows = stillMissing.map((i) => `${i.quantity} ${i.unit} \u00d7 ${i.name}`);
-  const html = renderEmailHtml({
-    title: `Partial delivery received`,
-    intro: `${businessName}${poNumber ? ` — PO ${poNumber}` : ''}`,
-    rows: [
-      { heading: 'Received this delivery', items: receivedRows },
-      ...(missingRows.length > 0 ? [{ heading: 'Still outstanding on this order', items: missingRows }] : []),
-    ],
-    footerNote: 'Please let us know when the remaining items will be delivered.',
-    signOff: `${businessName} — sent via Tavzio`,
-  });
-
   return sendViaResend({
     to: supplierEmail,
     subject: `Partial delivery received - ${businessName}${poNumber ? ` PO ${poNumber}` : ''}`,
     text,
-    html,
     from: supplyFromAddress(businessName),
     replyTo: businessEmail || undefined,
   });
@@ -391,14 +294,13 @@ function supplyFromAddress(businessName) {
   return `${businessName} (via Tavzio Supply) <${RESEND_SUPPLY_ADDRESS}>`;
 }
 
-async function sendViaResend({ to, subject, text, html, from = RESEND_INVITE_FROM, replyTo, bcc }) {
+async function sendViaResend({ to, subject, text, from = RESEND_INVITE_FROM, replyTo, bcc }) {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     console.error('RESEND_API_KEY is not set - email was not sent.');
     return;
   }
   const body = { from, to, subject, text };
-  if (html) body.html = html;
   if (replyTo) body.reply_to = replyTo;
   if (bcc) body.bcc = bcc;
   const res = await fetch(RESEND_API_URL, {
