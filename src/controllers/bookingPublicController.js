@@ -14,6 +14,42 @@ const OTP_MAX_ATTEMPTS = 5;
 // to skip verification on a brand new booking attempt.
 const VERIFIED_WINDOW_MINUTES = 30;
 
+const DAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+
+// Real, server-side check against a per-day-of-week hours object (see
+// migration 0118's own shape). A missing day key means "no restriction
+// configured for this day" (allowed) - an explicit null value for the
+// day means "closed" (rejected). No hoursObj at all means the business
+// hasn't set any hours yet, so nothing is restricted.
+function checkWithinHours(isoDateTime, hoursObj, errorMessage) {
+  if (!hoursObj) return null;
+  const d = new Date(isoDateTime);
+  const dayKey = DAY_KEYS[d.getDay()];
+  if (!(dayKey in hoursObj)) return null; // day not configured at all - no restriction
+  const dayHours = hoursObj[dayKey];
+  if (!dayHours) return `${errorMessage} (closed that day)`;
+  const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const open = dayHours.open ? String(dayHours.open).slice(0, 5) : null;
+  const close = dayHours.close ? String(dayHours.close).slice(0, 5) : null;
+  if (open && hhmm < open) return errorMessage;
+  if (close && hhmm > close) return errorMessage;
+  return null;
+}
+
+// Real, server-side check for a single service's own available window
+// (e.g. a birthday package only offered 18:00-22:00) - either bound can
+// be null, meaning no restriction on that side.
+function checkWithinTimeRange(isoDateTime, startTime, endTime, errorMessage) {
+  if (!startTime && !endTime) return null;
+  const d = new Date(isoDateTime);
+  const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const start = startTime ? String(startTime).slice(0, 5) : null;
+  const end = endTime ? String(endTime).slice(0, 5) : null;
+  if (start && hhmm < start) return errorMessage;
+  if (end && hhmm > end) return errorMessage;
+  return null;
+}
+
 // @route GET /api/public/business/:slug/booking-config
 // What the public booking page actually needs to know before it can
 // render itself correctly: is booking even on, does this business take
@@ -23,7 +59,7 @@ const VERIFIED_WINDOW_MINUTES = 30;
 const getBookingConfig = asyncHandler(async (req, res) => {
   const { data: business, error } = await supabaseAdmin
     .from('businesses')
-    .select('id, name, features')
+    .select('id, name, features, operating_hours, booking_hours')
     .eq('slug', req.params.slug)
     .eq('status', 'active')
     .maybeSingle();
@@ -49,7 +85,7 @@ const getBookingConfig = asyncHandler(async (req, res) => {
   // endpoint before, so the customer-facing form had nothing to show.
   const { data: services } = await supabaseAdmin
     .from('services')
-    .select('id, name, description, price, duration_minutes, service_options(id, label, price_delta, sort_order)')
+    .select('id, name, description, price, duration_minutes, available_start_time, available_end_time, service_options(id, label, price_delta, sort_order)')
     .eq('business_id', business.id)
     .eq('is_available', true)
     .order('sort_order');
@@ -60,6 +96,11 @@ const getBookingConfig = asyncHandler(async (req, res) => {
     downPayment: booking.downPayment || { enabled: false },
     menu,
     services: services || [],
+    // Real fix for the explicit request: the business's actual opening
+    // hours, and the optional booking-specific override - the frontend
+    // uses these to only ever offer real, valid time slots.
+    operatingHours: business.operating_hours || null,
+    bookingHours: business.booking_hours || null,
   });
 });
 
@@ -141,11 +182,19 @@ const createPublicBooking = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'phone, guestName, partySize, and requestedAt are required' });
   }
 
-  const { data: business } = await supabaseAdmin.from('businesses').select('id, name, features').eq('slug', req.params.slug).eq('status', 'active').maybeSingle();
+  const { data: business } = await supabaseAdmin.from('businesses').select('id, name, features, operating_hours, booking_hours').eq('slug', req.params.slug).eq('status', 'active').maybeSingle();
   if (!business) return res.status(404).json({ message: 'Business not found' });
 
   const bookingConfig = business.features?.onlineBooking || {};
   if (!bookingConfig.enabled) return res.status(404).json({ message: 'Online booking is not available for this business' });
+
+  // Real, server-side check - the actual hours the booking hours setting
+  // (or, if unset, the business's own real operating hours) allows for
+  // this day of the week. A client-side picker restricting the options
+  // shown is a UX convenience, not a security boundary.
+  const effectiveHours = business.booking_hours || business.operating_hours;
+  const hoursError = checkWithinHours(requestedAt, effectiveHours, 'That time is outside this business\'s booking hours');
+  if (hoursError) return res.status(400).json({ message: hoursError });
 
   if (!(await requireVerifiedPhone(business.id, phone))) {
     return res.status(400).json({ message: 'Verify your phone number first' });
@@ -193,9 +242,11 @@ const createPublicBooking = asyncHandler(async (req, res) => {
   let resolvedServiceOptionId = null;
   let serviceTotal = 0;
   if (serviceId) {
-    const { data: service } = await supabaseAdmin.from('services').select('id, price, is_available').eq('id', serviceId).eq('business_id', business.id).maybeSingle();
+    const { data: service } = await supabaseAdmin.from('services').select('id, price, is_available, available_start_time, available_end_time').eq('id', serviceId).eq('business_id', business.id).maybeSingle();
     if (!service || !service.is_available) return res.status(400).json({ message: 'That service is not available' });
     if (!serviceRequestedAt) return res.status(400).json({ message: 'A time is required for the service you selected' });
+    const serviceTimeError = checkWithinTimeRange(serviceRequestedAt, service.available_start_time, service.available_end_time, 'That time is outside this service\'s available hours');
+    if (serviceTimeError) return res.status(400).json({ message: serviceTimeError });
     resolvedServiceId = service.id;
     serviceTotal = Number(service.price);
 
@@ -451,7 +502,7 @@ const listMyBookings = asyncHandler(async (req, res) => {
 
   const { data: bookings, error } = await supabaseAdmin
     .from('bookings')
-    .select('id, guest_name, party_size, requested_at, note, status, down_payment_status')
+    .select('id, guest_name, party_size, requested_at, note, status, down_payment_status, service_requested_at, services(name), service_options(label)')
     .eq('business_id', business.id)
     .eq('contact_phone', phone)
     .in('status', ['pending', 'confirmed'])
@@ -554,9 +605,52 @@ const cancelPublicBooking = asyncHandler(async (req, res) => {
   res.json(updated);
 });
 
+// @route PATCH /api/public/bookings/:bookingId/cancel-service
+// Real, separate action for the explicit request: cancels only the
+// attached service, leaving the table reservation itself completely
+// intact - a guest who no longer wants the birthday package still
+// keeps their table.
+const cancelPublicBookingService = asyncHandler(async (req, res) => {
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ message: 'phone is required' });
+
+  const { data: booking } = await supabaseAdmin
+    .from('bookings')
+    .select('id, business_id, status, contact_phone, service_id')
+    .eq('id', req.params.bookingId)
+    .maybeSingle();
+  if (!booking || booking.contact_phone !== phone) {
+    return res.status(404).json({ message: 'Booking not found' });
+  }
+  if (!['pending', 'confirmed'].includes(booking.status)) {
+    return res.status(400).json({ message: 'This booking can no longer be changed' });
+  }
+  if (!booking.service_id) {
+    return res.status(400).json({ message: 'This booking has no service attached' });
+  }
+
+  const { data: updated, error } = await supabaseAdmin
+    .from('bookings')
+    .update({ service_id: null, service_option_id: null, service_requested_at: null })
+    .eq('id', booking.id)
+    .select('*, services(name), service_options(label)')
+    .single();
+  if (error) return res.status(400).json({ message: error.message });
+
+  await logAction({
+    businessId: booking.business_id,
+    actor: null,
+    action: 'booking_service_cancelled_by_customer',
+    targetId: booking.id,
+    details: {},
+  });
+
+  res.json(updated);
+});
+
 module.exports = {
   getBookingConfig, requestBookingOtp, verifyBookingOtp, createPublicBooking,
   getBookingPaymentStatus, getBookingArrival, confirmArrivalByCustomer,
-  cancelPublicBooking, listMyBookings, reschedulePublicBooking,
+  cancelPublicBooking, cancelPublicBookingService, listMyBookings, reschedulePublicBooking,
   reconcilePendingBookingPayments,
 };

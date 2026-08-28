@@ -9,7 +9,7 @@ const { createFolioPaymentSession, confirmFolioPayment } = require('../controlle
 const {
   getBookingConfig, requestBookingOtp, verifyBookingOtp, createPublicBooking,
   getBookingPaymentStatus, getBookingArrival, confirmArrivalByCustomer,
-  cancelPublicBooking, listMyBookings, reschedulePublicBooking,
+  cancelPublicBooking, cancelPublicBookingService, listMyBookings, reschedulePublicBooking,
 } = require('../controllers/bookingPublicController');
 const {
   resolveCardTap,
@@ -113,6 +113,7 @@ router.get('/bookings/:bookingId/status', getBookingPaymentStatus);
 router.get('/bookings/:bookingId/arrival', getBookingArrival);
 router.post('/bookings/:bookingId/confirm-arrival', confirmArrivalByCustomer);
 router.post('/bookings/:bookingId/cancel', cancelPublicBooking);
+router.patch('/bookings/:bookingId/cancel-service', cancelPublicBookingService);
 router.get('/business/:slug/my-bookings', listMyBookings);
 router.patch('/bookings/:bookingId/reschedule', reschedulePublicBooking);
 

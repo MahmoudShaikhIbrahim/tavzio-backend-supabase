@@ -114,3 +114,14 @@ setInterval(() => {
   checkContractBillingAndExpiryNotifications().catch((err) => console.error('Contract billing/expiry check failed:', err.message));
 }, 24 * 60 * 60 * 1000);
 checkContractBillingAndExpiryNotifications().catch((err) => console.error('Contract billing/expiry check failed:', err.message));
+
+// Real, explicit request: a completed order older than 24 hours is
+// deleted automatically - same once-a-day cadence as the check above,
+// since this doesn't need minute-level polling either. Also runs once
+// immediately on startup, matching the same reasoning: a freshly-
+// deployed server shouldn't wait a full day before its first real pass.
+const { deleteOldCompletedOrders } = require('./controllers/orderController');
+setInterval(() => {
+  deleteOldCompletedOrders().catch((err) => console.error('Completed-order cleanup failed:', err.message));
+}, 24 * 60 * 60 * 1000);
+deleteOldCompletedOrders().catch((err) => console.error('Completed-order cleanup failed:', err.message));

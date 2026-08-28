@@ -18,7 +18,7 @@ const getBusiness = asyncHandler(async (req, res) => {
 
 // @route PATCH /api/businesses/:businessId
 const updateBusiness = asyncHandler(async (req, res) => {
-  const { name, logoUrl, coverImageUrl, description, category, theme, links, notificationSettings, orderingPaused, trn, tourismDirhamRateAed } = req.body;
+  const { name, logoUrl, coverImageUrl, description, category, theme, links, notificationSettings, orderingPaused, trn, tourismDirhamRateAed, operatingHours, bookingHours } = req.body;
 
   // Business Type (category) determines which product architecture a
   // business gets (restaurant/F&B POS vs the eventual hotel PMS+F&B
@@ -55,6 +55,13 @@ const updateBusiness = asyncHandler(async (req, res) => {
   }
   if (orderingPaused !== undefined) update.ordering_paused = !!orderingPaused;
   if (theme !== undefined) update.theme = { ...existing.theme, ...theme };
+  // Real, explicit per-day hours - operatingHours is the business's own
+  // real opening/closing times (Business Profile), bookingHours is the
+  // optional override specifically for Online Booking's own picker.
+  // Sent wholesale (not deep-merged like links/notifications) since the
+  // frontend always sends the complete 7-day object it's editing.
+  if (operatingHours !== undefined) update.operating_hours = operatingHours;
+  if (bookingHours !== undefined) update.booking_hours = bookingHours;
 
   // Each of the 4 notification events is deep-merged individually, same
   // pattern as ordering/booking in setBusinessFeatures - so updating just

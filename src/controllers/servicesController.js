@@ -14,7 +14,7 @@ const listServices = asyncHandler(async (req, res) => {
 
 // @route POST /api/businesses/:businessId/services
 const createService = asyncHandler(async (req, res) => {
-  const { name, description, price, durationMinutes, sortOrder = 0 } = req.body;
+  const { name, description, price, durationMinutes, sortOrder = 0, availableStartTime, availableEndTime } = req.body;
   const { data, error } = await req.supabase
     .from('services')
     .insert({
@@ -24,6 +24,10 @@ const createService = asyncHandler(async (req, res) => {
       price: price || 0,
       duration_minutes: durationMinutes || 30,
       sort_order: sortOrder,
+      // Real, explicit per-service availability window (see migration
+      // 0118) - null on either bound means no restriction for that side.
+      available_start_time: availableStartTime || null,
+      available_end_time: availableEndTime || null,
     })
     .select()
     .single();
@@ -34,7 +38,7 @@ const createService = asyncHandler(async (req, res) => {
 
 // @route PATCH /api/businesses/:businessId/services/:serviceId
 const updateService = asyncHandler(async (req, res) => {
-  const { name, description, price, durationMinutes, isAvailable, sortOrder } = req.body;
+  const { name, description, price, durationMinutes, isAvailable, sortOrder, availableStartTime, availableEndTime } = req.body;
   const update = {};
   if (name !== undefined) update.name = name;
   if (description !== undefined) update.description = description;
@@ -42,6 +46,8 @@ const updateService = asyncHandler(async (req, res) => {
   if (durationMinutes !== undefined) update.duration_minutes = durationMinutes;
   if (isAvailable !== undefined) update.is_available = isAvailable;
   if (sortOrder !== undefined) update.sort_order = sortOrder;
+  if (availableStartTime !== undefined) update.available_start_time = availableStartTime || null;
+  if (availableEndTime !== undefined) update.available_end_time = availableEndTime || null;
 
   const { data, error } = await req.supabase
     .from('services')

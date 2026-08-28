@@ -219,6 +219,10 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   // change back through 'preparing' (an order shouldn't look like it
   // "started" twice just because it was corrected).
   if (status === 'preparing') update.prep_started_at = new Date().toISOString();
+  // Real, explicit timestamp for the 24-hour auto-cleanup job to check
+  // against - only stamped the first time, same reasoning as
+  // prep_started_at not being overwritten by a later correction.
+  if (status === 'completed') update.completed_at = new Date().toISOString();
 
   let query = req.supabase.from('orders').update(update).eq('id', req.params.orderId).eq('business_id', req.params.businessId);
   if (status === 'preparing') query = query.is('prep_started_at', null);
@@ -961,4 +965,23 @@ const assignTable = asyncHandler(async (req, res) => {
   res.json(order);
 });
 
-module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, listRequests, listRequestsForSection, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse, assignTable };
+// Real, explicit cleanup for the explicit request: a completed order
+// more than 24 hours old is deleted outright, not just hidden - checked
+// against the real completed_at timestamp stamped by updateOrderStatus
+// above, not an inferred one. Scoped deliberately to request_type =
+// 'order' (real food orders) only - a completed request (Call Waiter,
+// Request Bill, a custom notification) is a different kind of record
+// and was never meant to be swept up here.
+async function deleteOldCompletedOrders() {
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { error, count } = await supabaseAdmin
+    .from('orders')
+    .delete({ count: 'exact' })
+    .eq('request_type', 'order')
+    .eq('status', 'completed')
+    .lt('completed_at', cutoff);
+  if (error) throw new Error(error.message);
+  if (count) console.log(`Auto-cleanup: deleted ${count} completed order(s) older than 24 hours.`);
+}
+
+module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, listRequests, listRequestsForSection, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse, assignTable, deleteOldCompletedOrders };
