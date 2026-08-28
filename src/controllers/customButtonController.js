@@ -23,7 +23,7 @@ const listCustomButtons = asyncHandler(async (req, res) => {
 
 // @route POST /api/businesses/:businessId/custom-buttons
 const createCustomButton = asyncHandler(async (req, res) => {
-  const { label, icon, imageUrl, url, sortOrder = 0, buttonType = 'link', notificationDestination = 'general', targetSection = null, parentButtonId = null } = req.body;
+  const { label, icon, imageUrl, url, sortOrder = 0, buttonType = 'link', notificationDestination = 'general', targetSection = null, parentButtonId = null, allowNote = true, color = null } = req.body;
   const labelI18n = await translateToAllLanguages(label).catch(() => ({}));
   const { data, error } = await req.supabase
     .from('custom_buttons')
@@ -39,6 +39,8 @@ const createCustomButton = asyncHandler(async (req, res) => {
       notification_destination: notificationDestination,
       target_section: targetSection,
       parent_button_id: parentButtonId,
+      allow_note: allowNote,
+      color,
     })
     .select()
     .single();
@@ -49,7 +51,7 @@ const createCustomButton = asyncHandler(async (req, res) => {
 
 // @route PATCH /api/businesses/:businessId/custom-buttons/:buttonId
 const updateCustomButton = asyncHandler(async (req, res) => {
-  const { label, icon, imageUrl, url, enabled, sortOrder, buttonType, notificationDestination, targetSection, parentButtonId } = req.body;
+  const { label, icon, imageUrl, url, enabled, sortOrder, buttonType, notificationDestination, targetSection, parentButtonId, allowNote, color } = req.body;
   const update = {};
   if (label !== undefined) {
     update.label = label;
@@ -64,6 +66,8 @@ const updateCustomButton = asyncHandler(async (req, res) => {
   if (notificationDestination !== undefined) update.notification_destination = notificationDestination;
   if (targetSection !== undefined) update.target_section = targetSection;
   if (parentButtonId !== undefined) update.parent_button_id = parentButtonId;
+  if (allowNote !== undefined) update.allow_note = allowNote;
+  if (color !== undefined) update.color = color;
 
   const { data, error } = await req.supabase
     .from('custom_buttons')
@@ -130,7 +134,7 @@ const submitCustomButtonRequest = asyncHandler(async (req, res) => {
 
   const { data: button } = await supabaseAdmin
     .from('custom_buttons')
-    .select('id, label, business_id, button_type, enabled, notification_destination, target_section')
+    .select('id, label, business_id, button_type, enabled, notification_destination, target_section, allow_note, color')
     .eq('id', req.params.buttonId)
     .eq('business_id', business.id)
     .maybeSingle();
@@ -151,12 +155,14 @@ const submitCustomButtonRequest = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Requests must follow a real tap, and this one has expired or is invalid' });
   }
 
+  const effectiveNote = button.allow_note ? note.trim() : '';
+
   if (button.notification_destination === 'housekeeping_task') {
     const roomId = await resolveRoomFromCard(tapEvent.card_id);
     if (!roomId) return res.status(400).json({ message: 'This stand is not linked to a room, so a housekeeping task cannot be created for it' });
     const { data: task, error } = await supabaseAdmin
       .from('housekeeping_tasks')
-      .insert({ business_id: business.id, room_id: roomId, task_type: 'cleaning', notes: button.label })
+      .insert({ business_id: business.id, room_id: roomId, task_type: 'cleaning', notes: effectiveNote ? `${button.label}: ${effectiveNote}` : button.label })
       .select()
       .single();
     if (error) return res.status(400).json({ message: error.message });
@@ -170,7 +176,7 @@ const submitCustomButtonRequest = asyncHandler(async (req, res) => {
     const roomId = await resolveRoomFromCard(tapEvent.card_id);
     const { data: ticket, error } = await supabaseAdmin
       .from('maintenance_tickets')
-      .insert({ business_id: business.id, room_id: roomId, title: button.label, priority: 'normal' })
+      .insert({ business_id: business.id, room_id: roomId, title: button.label, priority: 'normal', description: effectiveNote })
       .select()
       .single();
     if (error) return res.status(400).json({ message: error.message });
@@ -195,8 +201,9 @@ const submitCustomButtonRequest = asyncHandler(async (req, res) => {
       note: '',
       total: 0,
       request_type: 'custom',
-      custom_request_label: note.trim() ? `${button.label}: ${note.trim()}` : button.label,
+      custom_request_label: effectiveNote ? `${button.label}: ${effectiveNote}` : button.label,
       target_section: button.target_section,
+      request_color: button.color,
       // Explicit, not relying on the column default - same fix, same
       // reasoning, as publicController.js's submitOrder.
       source: 'customer_tap',

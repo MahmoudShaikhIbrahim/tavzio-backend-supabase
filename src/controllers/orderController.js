@@ -47,10 +47,17 @@ const listOrders = asyncHandler(async (req, res) => {
 // Call Waiter / Request Bill pings - a lightweight, separate feed, never
 // mixed into the kitchen's order queue. Only ever pending or completed
 // (dismissed) - never goes through preparing/ready/cancelled.
+// Sections that get a genuine dedicated redirect - a request targeted
+// at one of these never appears on the general Requests page at all,
+// for anyone, regardless of their own section assignment. front-desk is
+// deliberately excluded: for a hotel, Requests IS the front desk's own
+// view, there's no separate dedicated screen for it to redirect to.
+const REDIRECT_SECTIONS = ['kitchen', 'pos', 'orders', 'tables'];
+
 const listRequests = asyncHandler(async (req, res) => {
   const { data, error } = await req.supabase
     .from('orders')
-    .select('id, table_label, request_type, custom_request_label, target_section, status, created_at')
+    .select('id, table_label, request_type, custom_request_label, target_section, request_color, status, created_at')
     .eq('business_id', req.params.businessId)
     .neq('request_type', 'order')
     .eq('voided', false)
@@ -69,7 +76,7 @@ const listRequests = asyncHandler(async (req, res) => {
   // this merge.
   const { data: guestRequests, error: guestError } = await req.supabase
     .from('guest_service_requests')
-    .select('id, room_id, request_type, note, status, created_at, target_section, hotel_rooms(room_number)')
+    .select('id, room_id, request_type, note, status, created_at, target_section, request_color, hotel_rooms(room_number)')
     .eq('business_id', req.params.businessId)
     .order('created_at', { ascending: false })
     .limit(50);
@@ -84,6 +91,7 @@ const listRequests = asyncHandler(async (req, res) => {
     request_type: 'custom',
     custom_request_label: `${r.request_type.replace(/_/g, ' ')}${r.note ? ' - ' + r.note : ''}`,
     target_section: r.target_section,
+    request_color: r.request_color,
     // guest_service_requests uses 'done'; orders uses 'completed' - the
     // frontend's active/completed filter only knows 'completed', so this
     // is normalized here rather than teaching the frontend a second
@@ -93,6 +101,10 @@ const listRequests = asyncHandler(async (req, res) => {
   }));
 
   const combined = [...(data || []), ...normalizedGuestRequests]
+    // Real fix for the explicit request: a request routed to one of the
+    // true-redirect sections never shows here at all, for any viewer -
+    // it belongs exclusively to that section's own dedicated page now.
+    .filter((r) => !r.target_section || !REDIRECT_SECTIONS.includes(r.target_section))
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
     .slice(0, 50);
 
@@ -109,6 +121,51 @@ const listRequests = asyncHandler(async (req, res) => {
     : combined; // unrestricted staff (or owner) sees everything
 
   res.json(visible);
+});
+
+// @route GET /api/businesses/:businessId/requests/for-section/:section
+// The real other half of the redirect: a dedicated page (Kitchen, POS
+// Terminal, Tables, or Orders' own attention-items strip) calls this to
+// fetch exactly the pending notifications routed to it - the same real
+// rows that used to only ever surface on the general Requests page.
+const listRequestsForSection = asyncHandler(async (req, res) => {
+  const section = req.params.section;
+
+  const [{ data: orderRequests, error: orderError }, { data: guestRequests, error: guestError }] = await Promise.all([
+    req.supabase
+      .from('orders')
+      .select('id, table_label, request_type, custom_request_label, target_section, request_color, status, created_at')
+      .eq('business_id', req.params.businessId)
+      .neq('request_type', 'order')
+      .eq('voided', false)
+      .eq('target_section', section)
+      .neq('status', 'completed')
+      .order('created_at', { ascending: false }),
+    req.supabase
+      .from('guest_service_requests')
+      .select('id, room_id, request_type, note, status, created_at, target_section, request_color, hotel_rooms(room_number)')
+      .eq('business_id', req.params.businessId)
+      .eq('target_section', section)
+      .neq('status', 'done')
+      .order('created_at', { ascending: false }),
+  ]);
+  if (orderError) return res.status(400).json({ message: orderError.message });
+  if (guestError) return res.status(400).json({ message: guestError.message });
+
+  const normalizedGuestRequests = (guestRequests || []).map((r) => ({
+    id: `gsr:${r.id}`,
+    table_label: r.hotel_rooms?.room_number ? `Room ${r.hotel_rooms.room_number}` : 'Front Desk',
+    request_type: 'custom',
+    custom_request_label: `${r.request_type.replace(/_/g, ' ')}${r.note ? ' - ' + r.note : ''}`,
+    target_section: r.target_section,
+    request_color: r.request_color,
+    status: r.status === 'done' ? 'completed' : r.status,
+    created_at: r.created_at,
+  }));
+
+  const combined = [...(orderRequests || []), ...normalizedGuestRequests]
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  res.json(combined);
 });
 
 // @route PATCH /api/businesses/:businessId/requests/:requestId/dismiss
@@ -904,4 +961,4 @@ const assignTable = asyncHandler(async (req, res) => {
   res.json(order);
 });
 
-module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, listRequests, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse, assignTable };
+module.exports = { listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, listRequests, listRequestsForSection, dismissRequest, recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse, assignTable };

@@ -1,6 +1,6 @@
 const express = require('express');
 const {
-  listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, listRequests, dismissRequest,
+  listOrders, updateOrderStatus, voidOrder, voidOrderItem, clearTable, placeStaffOrder, createPosOrder, listRequests, listRequestsForSection, dismissRequest,
   recordManualPayment, listCashPendingItems, ackOrderReady, fireCourse, assignTable,
 } = require('../controllers/orderController');
 const { reprintKitchenTicket } = require('../controllers/kitchenPrinterController');
@@ -16,6 +16,7 @@ router.post('/clear-table', clearTable);
 router.post('/staff-place', placeStaffOrder);
 router.post('/pos', createPosOrder);
 router.get('/requests', listRequests);
+router.get('/requests/for-section/:section', listRequestsForSection);
 router.get('/cash-pending', listCashPendingItems);
 router.patch('/requests/:requestId/dismiss', dismissRequest);
 

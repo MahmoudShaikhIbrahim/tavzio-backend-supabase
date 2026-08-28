@@ -180,7 +180,7 @@ const createPublicBooking = asyncHandler(async (req, res) => {
       if (!menuItem) continue;
       const quantity = Math.max(1, Number(item.quantity) || 1);
       itemsTotal += menuItem.price * quantity;
-      itemRows.push({ menu_item_id: menuItem.id, item_name: menuItem.name, quantity, unit_price: menuItem.price });
+      itemRows.push({ menu_item_id: menuItem.id, item_name: menuItem.name, quantity, unit_price: menuItem.price, note: String(item.note || '').trim().slice(0, 300) });
     }
   }
 

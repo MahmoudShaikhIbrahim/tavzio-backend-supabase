@@ -5,7 +5,7 @@ const { logAction } = require('../utils/auditLog');
 const listBookings = asyncHandler(async (req, res) => {
   let query = req.supabase
     .from('bookings')
-    .select('*, tables!table_id(label), booking_items(id, menu_item_id, item_name, quantity, unit_price)')
+    .select('*, tables!table_id(label), booking_items(id, menu_item_id, item_name, quantity, unit_price, note), services(name), service_options(label)')
     .eq('business_id', req.params.businessId)
     .order('requested_at', { ascending: true });
 

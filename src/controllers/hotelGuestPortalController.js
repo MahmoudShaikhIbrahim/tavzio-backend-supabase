@@ -101,7 +101,7 @@ const getGuestPortal = asyncHandler(async (req, res) => {
   // portal, so both button systems always render together, one page.
   const { data: customButtons } = await supabaseAdmin
     .from('custom_buttons')
-    .select('id, label, icon, image_url, url, button_type, notification_destination, target_section, parent_button_id')
+    .select('id, label, icon, image_url, url, button_type, notification_destination, target_section, parent_button_id, allow_note, color')
     .eq('business_id', business.id)
     .eq('enabled', true)
     .order('sort_order');
@@ -135,7 +135,7 @@ const getGuestPortal = asyncHandler(async (req, res) => {
 // list - a dedicated queue per department is a reasonable next step, but
 // every request submitted here is real and staff-visible today either way.
 const submitGuestRequest = asyncHandler(async (req, res) => {
-  const { requestType = 'other', note = '', quantity, targetSection } = req.body;
+  const { requestType = 'other', note = '', quantity, targetSection, color } = req.body;
 
   const ctx = await resolveGuestContext(req.params.slug, req.params.roomId);
   if (!ctx) return res.status(404).json({ message: 'Not found' });
@@ -175,7 +175,7 @@ const submitGuestRequest = asyncHandler(async (req, res) => {
 
   const { data, error } = await supabaseAdmin
     .from('guest_service_requests')
-    .insert({ business_id: business.id, room_id: room?.id || null, reservation_id: reservation?.id || null, request_type: requestType, note: noteWithContext, target_section: targetSection || null })
+    .insert({ business_id: business.id, room_id: room?.id || null, reservation_id: reservation?.id || null, request_type: requestType, note: noteWithContext, target_section: targetSection || null, request_color: color || null })
     .select()
     .single();
   if (error) return res.status(400).json({ message: error.message });
