@@ -72,11 +72,30 @@ const getBookingConfig = asyncHandler(async (req, res) => {
   if (booking.allowPreOrder) {
     const { data: items } = await supabaseAdmin
       .from('menu_items')
-      .select('id, name, price, description, image_url, category_id, menu_categories(name)')
+      .select('id, name, price, description, image_url, category_id, menu_categories(name, sort_order)')
       .eq('business_id', business.id)
       .eq('is_available', true)
       .order('sort_order');
-    menu = items || [];
+    // Real fix for the confirmed request: ordering by the ITEM's own
+    // sort_order alone doesn't actually group by category correctly -
+    // every category's items independently restart at sort_order 0, so
+    // whichever category happened to contain the item with the lowest
+    // sort_order ended up first once the frontend grouped these by
+    // insertion order, regardless of what the owner actually set as
+    // their first category (e.g. "Salads" appearing before "Main"
+    // purely by coincidence of item sort_order values, not category
+    // order). Sorting here by (category sort_order, then item
+    // sort_order) makes items arrive already grouped in the owner's
+    // real category order - the same order the actual NFC customer
+    // menu (MenuPage.tsx) already gets right by using a real, separate,
+    // correctly-ordered categories list; this endpoint has no such
+    // separate list on the frontend, so the fix has to happen here,
+    // before the items are ever sent.
+    menu = (items || []).slice().sort((a, b) => {
+      const catA = a.menu_categories?.sort_order ?? Number.MAX_SAFE_INTEGER;
+      const catB = b.menu_categories?.sort_order ?? Number.MAX_SAFE_INTEGER;
+      return catA - catB;
+    });
   }
 
   // Real fix for the confirmed request: services (with their real
