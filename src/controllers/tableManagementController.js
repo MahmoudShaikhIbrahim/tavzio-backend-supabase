@@ -304,14 +304,14 @@ const cancelWaitlistEntry = asyncHandler(async (req, res) => {
 const listFloorPlanCells = asyncHandler(async (req, res) => {
   const { data, error } = await req.supabase
     .from('floor_plan_cells')
-    .select('id, grid_x, grid_y, cell_type')
+    .select('id, grid_x, grid_y, cell_type, orientation')
     .eq('business_id', req.params.businessId);
   if (error) return res.status(400).json({ message: error.message });
-  res.json(data.map((c) => ({ id: c.id, gridX: c.grid_x, gridY: c.grid_y, cellType: c.cell_type })));
+  res.json(data.map((c) => ({ id: c.id, gridX: c.grid_x, gridY: c.grid_y, cellType: c.cell_type, orientation: c.orientation })));
 });
 
 // @route PUT /api/businesses/:businessId/floor-plan-cells
-// Body: { cells: [{ gridX, gridY, cellType }] }
+// Body: { cells: [{ gridX, gridY, cellType, orientation? }] }
 // Replaces the WHOLE set in one call, same tap-to-place editing session
 // pattern as arranging tables - staff build up the outline over several
 // taps, then save once, rather than one request per wall segment.
@@ -332,10 +332,11 @@ const setFloorPlanCells = asyncHandler(async (req, res) => {
     grid_x: c.gridX,
     grid_y: c.gridY,
     cell_type: c.cellType,
+    orientation: c.orientation || 'left',
   }));
   const { data, error } = await req.supabase.from('floor_plan_cells').insert(rows).select();
   if (error) return res.status(400).json({ message: error.message });
-  res.json(data.map((c) => ({ id: c.id, gridX: c.grid_x, gridY: c.grid_y, cellType: c.cell_type })));
+  res.json(data.map((c) => ({ id: c.id, gridX: c.grid_x, gridY: c.grid_y, cellType: c.cell_type, orientation: c.orientation })));
 });
 
 module.exports = {
