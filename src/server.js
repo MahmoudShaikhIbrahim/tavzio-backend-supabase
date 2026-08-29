@@ -54,12 +54,19 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 // exhaust the SAME budget login itself depends on, locking someone out
 // of their own account with no relation to actual login attempts.
 // Separate budgets now, so business API traffic can never starve out
-// login again. 600 for business traffic reflects what a real multi-page
-// dashboard with 15s notification polling plus realtime actually uses
-// over 15 minutes, not the original number sized before most of this
-// app's current page count existed.
-const authApiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 300 });
-const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 600 });
+// login again.
+//
+// Real correction to the number itself, confirmed by an explicit
+// report of repeated 429s: the reasoning above assumed 15s polling,
+// but usePollingFallback's actual, real interval is 5 seconds - three
+// times more requests than this limit was ever sized for, on top of
+// which several pages each run their own additional realtime
+// subscriptions, and a real user very visibly runs multiple tabs at
+// once (each with its own independent set of active polls). 600/15min
+// was never enough for the architecture this app actually has now;
+// this is a real recalibration to match it, not an arbitrary bump.
+const authApiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 900 });
+const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 4000 });
 const publicLimiter = rateLimit({ windowMs: 60 * 1000, max: 60 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
