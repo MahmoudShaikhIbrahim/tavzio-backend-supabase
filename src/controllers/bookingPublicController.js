@@ -3,6 +3,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const { logAction } = require('../utils/auditLog');
 const { sendOtp, validateOtp } = require('../utils/smsAdapter');
 const { decryptConfig } = require('../utils/credentialEncryption');
+const { calculateVatInclusive } = require('../utils/vat');
 const { primaryClientUrl } = require('../utils/clientUrl');
 
 const OTP_EXPIRY_MINUTES = 10;
@@ -59,17 +60,26 @@ function checkWithinTimeRange(isoDateTime, startTime, endTime, errorMessage) {
 const getBookingConfig = asyncHandler(async (req, res) => {
   const { data: business, error } = await supabaseAdmin
     .from('businesses')
-    .select('id, name, features, operating_hours, booking_hours')
+    .select('id, name, logo_url, features, operating_hours, booking_hours')
     .eq('slug', req.params.slug)
     .eq('status', 'active')
     .maybeSingle();
   if (error || !business) return res.status(404).json({ message: 'Business not found' });
 
   const booking = business.features?.onlineBooking || {};
-  if (!booking.enabled) return res.status(404).json({ message: 'Online booking is not available for this business' });
+  // Real fix for the explicit request: a business can have table
+  // booking OFF and drive-through ON (or vice versa) - the chooser page
+  // needs to know which of the two is actually available and only show
+  // that button, so this only 404s when NEITHER is on, instead of the
+  // old all-or-nothing gate that assumed table booking was the only
+  // thing this endpoint could ever be for.
+  const driveThrough = business.features?.driveThrough || {};
+  if (!booking.enabled && !driveThrough.enabled) {
+    return res.status(404).json({ message: 'Online booking is not available for this business' });
+  }
 
   let menu = [];
-  if (booking.allowPreOrder) {
+  if (booking.allowPreOrder || driveThrough.enabled) {
     const { data: items } = await supabaseAdmin
       .from('menu_items')
       .select('id, name, price, description, image_url, category_id, menu_categories(name, sort_order)')
@@ -120,6 +130,19 @@ const getBookingConfig = asyncHandler(async (req, res) => {
     // uses these to only ever offer real, valid time slots.
     operatingHours: business.operating_hours || null,
     bookingHours: business.booking_hours || null,
+    // Real, explicit addition for the drive-through feature: the chooser
+    // page needs to know whether each option is actually available
+    // (bookingEnabled separate from driveThrough.enabled, since either
+    // can be on independently), and both drive-through and the location
+    // button read their own config from here rather than a separate
+    // endpoint - one request, everything the chooser page needs.
+    bookingEnabled: !!booking.enabled,
+    driveThrough: {
+      enabled: !!driveThrough.enabled,
+      downPayment: driveThrough.downPayment || { enabled: false },
+    },
+    locationUrl: booking.locationUrl || '',
+    logoUrl: business.logo_url || '',
   });
 });
 
@@ -502,6 +525,342 @@ async function requireVerifiedPhone(businessId, phone) {
   return !!verified;
 }
 
+const MIN_ARRIVAL_MINUTES = 5;
+const MAX_ARRIVAL_MINUTES = 30;
+
+// Real, tap-free twin of publicController.js's own item-validation logic
+// (computeOrderCheckoutContext) - deliberately a separate copy rather
+// than a shared extraction, since that function is tightly coupled to
+// requiring a real NFC tap event, which drive-through explicitly must
+// never depend on. Same server-side pricing/availability guarantees
+// either way: never trust a client-submitted price or an item that's
+// actually paused/unavailable.
+async function validateDriveThroughItems(business, items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { errStatus: 400, errMessage: 'At least one item is required' };
+  }
+  const menuItemIds = items.map((i) => i.menuItemId);
+  const { data: menuItems } = await supabaseAdmin
+    .from('menu_items')
+    .select('id, name, price, category_id')
+    .in('id', menuItemIds)
+    .eq('business_id', business.id)
+    .eq('is_available', true);
+  if (!menuItems || menuItems.length !== menuItemIds.length) {
+    return { errStatus: 400, errMessage: 'One or more items are no longer available' };
+  }
+  const categoryIds = [...new Set(menuItems.map((m) => m.category_id).filter(Boolean))];
+  if (categoryIds.length > 0) {
+    const { data: pausedCategories } = await supabaseAdmin
+      .from('menu_categories').select('id').in('id', categoryIds).eq('paused', true);
+    if (pausedCategories && pausedCategories.length > 0) {
+      return { errStatus: 400, errMessage: 'One or more items are no longer available' };
+    }
+  }
+  const allAddonIds = items.flatMap((i) => i.addonIds || []);
+  let addonsById = {};
+  if (allAddonIds.length > 0) {
+    const { data: addons } = await supabaseAdmin.from('menu_item_addons').select('id, name, price').in('id', allAddonIds);
+    addonsById = Object.fromEntries((addons || []).map((a) => [a.id, a]));
+  }
+  const menuItemsById = Object.fromEntries(menuItems.map((m) => [m.id, m]));
+  const orderItemRows = items.map((i) => {
+    const menuItem = menuItemsById[i.menuItemId];
+    const selectedAddons = (i.addonIds || []).map((id) => addonsById[id]).filter(Boolean);
+    const addonTotal = selectedAddons.reduce((sum, a) => sum + Number(a.price), 0);
+    return {
+      menu_item_id: menuItem.id,
+      item_name: menuItem.name,
+      unit_price: menuItem.price,
+      quantity: Math.max(1, Number(i.quantity) || 1),
+      note: String(i.note || '').trim().slice(0, 300),
+      addons: selectedAddons.map((a) => ({ name: a.name, price: a.price })),
+      addon_total: addonTotal,
+    };
+  });
+  const total = orderItemRows.reduce((sum, i) => sum + (i.unit_price + i.addon_total) * i.quantity, 0);
+  return { orderItemRows, total };
+}
+
+// @route POST /api/public/business/:slug/drive-through/orders
+// Body: { phone, items, arrivalMinutes, note }
+// Real correction after explicit clarification: this now works exactly
+// like online booking's own down payment (computeDownPayment, same
+// enabled/mode/value shape, same function reused directly - not a
+// second implementation) rather than a separate "pay first / pay at
+// pickup / optional" scheme. No customer choice at checkout, same as
+// booking - the business's own configured downPayment fully determines
+// the amount, which can be 0 (nothing charged online, order reaches
+// the kitchen immediately, full amount collected at pickup via Record
+// Payment), the full total (nothing left to collect at pickup), or a
+// percentage/fixed deposit (order reaches the kitchen once that
+// deposit clears, the remainder still collectible via Record Payment
+// when the customer arrives - exactly why the POS pop-up notification
+// fires regardless of whether a deposit was taken, not only for a
+// fully-unpaid order).
+const createDriveThroughOrder = asyncHandler(async (req, res) => {
+  const { phone, items, arrivalMinutes, note = '' } = req.body;
+  if (!phone || !arrivalMinutes) {
+    return res.status(400).json({ message: 'phone and arrivalMinutes are required' });
+  }
+  const minutes = Number(arrivalMinutes);
+  if (!Number.isFinite(minutes) || minutes < MIN_ARRIVAL_MINUTES || minutes > MAX_ARRIVAL_MINUTES) {
+    return res.status(400).json({ message: `Arrival time must be between ${MIN_ARRIVAL_MINUTES} and ${MAX_ARRIVAL_MINUTES} minutes` });
+  }
+
+  const { data: business } = await supabaseAdmin
+    .from('businesses')
+    .select('id, name, features, operating_hours, booking_hours')
+    .eq('slug', req.params.slug)
+    .eq('status', 'active')
+    .maybeSingle();
+  if (!business) return res.status(404).json({ message: 'Business not found' });
+
+  const driveThrough = business.features?.driveThrough || {};
+  if (!driveThrough.enabled) return res.status(404).json({ message: 'Drive-through ordering is not available for this business' });
+
+  if (!(await requireVerifiedPhone(business.id, phone))) {
+    return res.status(400).json({ message: 'Verify your phone number first' });
+  }
+
+  const arrivalAt = new Date(Date.now() + minutes * 60000);
+  // Real, explicit request: drive-through respects the exact same hours
+  // as online booking - the business's own operating hours, or the
+  // booking-specific override if one is set, checked against the real
+  // arrival time, not just "now".
+  const effectiveHours = business.booking_hours || business.operating_hours;
+  const hoursError = checkWithinHours(arrivalAt.toISOString(), effectiveHours, 'That arrival time is outside this business\'s hours');
+  if (hoursError) return res.status(400).json({ message: hoursError });
+
+  const validation = await validateDriveThroughItems(business, items);
+  if (validation.errStatus) return res.status(validation.errStatus).json({ message: validation.errMessage });
+  const { orderItemRows, total } = validation;
+
+  let { data: customer } = await supabaseAdmin.from('customers').select('id').eq('phone', phone).maybeSingle();
+  if (!customer) await supabaseAdmin.from('customers').insert({ phone });
+
+  const downPaymentAmount = computeDownPayment(driveThrough.downPayment, total);
+
+  if (downPaymentAmount <= 0) {
+    // No deposit configured - reaches the kitchen immediately, exactly
+    // like any other order. Full amount collected at pickup via Record
+    // Payment (see the POS pop-up notification for how staff are
+    // alerted to a new one of these).
+    const { data: order, error: orderError } = await supabaseAdmin
+      .from('orders')
+      .insert({
+        business_id: business.id, card_id: null, table_label: '', note, total,
+        request_type: 'order', order_type: 'drive_through', arrival_at: arrivalAt.toISOString(),
+        status: 'pending', source: 'drive_through', pos_sync_status: 'not_applicable',
+      })
+      .select().single();
+    if (orderError) return res.status(400).json({ message: orderError.message });
+
+    const { error: itemsError } = await supabaseAdmin
+      .from('order_items').insert(orderItemRows.map((i) => ({ ...i, order_id: order.id })));
+    if (itemsError) return res.status(400).json({ message: itemsError.message });
+
+    if (business.features?.inventory?.enabled) {
+      const { deductStock } = require('../utils/inventoryStock');
+      deductStock({ businessId: business.id, orderItemRows, orderId: order.id }).catch(() => {});
+    }
+    return res.status(201).json({ order, paymentRequired: false });
+  }
+
+  // A deposit (full or partial) is required - the order does not exist
+  // as a real, visible order until that deposit actually clears. Reuses
+  // the exact same 'awaiting_payment' pipeline publicController.js's
+  // own pay-before-order NFC flow already uses (see migration 0121's
+  // comment for why this isn't a new mechanism), converging on the
+  // same cancelAwaitingOrder helper for the failure path - only the
+  // success path (finalizeDriveThroughOrder, below) diverges from that
+  // file's own finalizeOrderPayment, since THIS flow may only be
+  // collecting a partial deposit, not the full amount.
+  const { cancelAwaitingOrder } = require('./publicController');
+
+  const { data: paymentIntegration } = await supabaseAdmin
+    .from('pos_integrations')
+    .select('*').eq('business_id', business.id).eq('purpose', 'payment').eq('enabled', true).maybeSingle();
+  if (!paymentIntegration) {
+    return res.status(400).json({ message: 'This business requires a deposit for drive-through orders but has no payment method connected - contact them directly.' });
+  }
+  const config = decryptConfig(paymentIntegration.config);
+  const provider = config?.provider || 'tap';
+  if (provider !== 'telr' && provider !== 'ngenius' && provider !== 'ziina') {
+    return res.status(400).json({ message: 'This business does not use redirect-based payment for drive-through orders yet' });
+  }
+
+  const { data: order, error: orderError } = await supabaseAdmin
+    .from('orders')
+    .insert({
+      business_id: business.id, card_id: null, table_label: '', note, total,
+      request_type: 'order', order_type: 'drive_through', arrival_at: arrivalAt.toISOString(),
+      status: 'awaiting_payment', source: 'drive_through', pos_sync_status: 'not_applicable',
+    })
+    .select().single();
+  if (orderError) return res.status(400).json({ message: orderError.message });
+
+  const { data: insertedItems, error: itemsError } = await supabaseAdmin
+    .from('order_items').insert(orderItemRows.map((i) => ({ ...i, order_id: order.id }))).select();
+  if (itemsError) return res.status(400).json({ message: itemsError.message });
+
+  const { data: payment, error: paymentError } = await supabaseAdmin
+    .from('payments')
+    .insert({ business_id: business.id, card_id: null, order_item_ids: insertedItems.map((i) => i.id), amount: downPaymentAmount, tip_amount: 0, status: 'pending', provider })
+    .select().single();
+  if (paymentError) return res.status(400).json({ message: paymentError.message });
+
+  const returnUrl = `${primaryClientUrl()}/${req.params.slug}/book/drive-through?orderPaymentId=${payment.id}`;
+  const adapter = provider === 'telr'
+    ? require('../utils/telrAdapter')
+    : provider === 'ngenius'
+    ? require('../utils/ngeniusAdapter')
+    : require('../utils/ziinaBillAdapter');
+
+  const session = await adapter.createPaymentSession(config, downPaymentAmount, 'Tavzio drive-through order', payment.id, returnUrl);
+  if (!session.success) {
+    await supabaseAdmin.from('payments').update({ status: 'failed', failure_reason: session.error || '' }).eq('id', payment.id);
+    await cancelAwaitingOrder(order.id);
+    return res.status(502).json({ message: session.error || 'Could not start the payment' });
+  }
+
+  await supabaseAdmin.from('payments').update({ provider_ref: session.providerRef }).eq('id', payment.id);
+  res.status(201).json({ paymentRequired: true, redirectUrl: session.redirectUrl, paymentId: payment.id, orderId: order.id });
+});
+
+// Everything that must happen once a drive-through deposit has
+// genuinely cleared (verified server-side) - sends the order into the
+// normal kitchen/orders flow, exactly like finalizeOrderPayment in
+// publicController.js, EXCEPT items are only marked paid if this
+// payment actually covered the full total. A partial deposit unlocks
+// the kitchen but leaves the remainder for Record Payment to collect
+// later - it would be a real, dangerous bug to mark items paid for
+// money that was never actually collected.
+async function finalizeDriveThroughOrder({ order, orderItemRows, integration, business, amountPaid }) {
+  const fullyPaid = amountPaid >= Number(order.total) - 0.01; // 1 fils float tolerance, same allowance recordManualPayment uses
+  if (fullyPaid) {
+    await supabaseAdmin
+      .from('order_items')
+      .update({ paid: true, cash_pending: false, paid_at: new Date().toISOString() })
+      .eq('order_id', order.id);
+  }
+
+  await supabaseAdmin
+    .from('orders')
+    .update({ status: 'pending', pos_sync_status: integration ? 'pending' : 'not_applicable' })
+    .eq('id', order.id);
+
+  if (business?.features?.inventory?.enabled) {
+    const { deductStock } = require('../utils/inventoryStock');
+    deductStock({ businessId: business.id, orderItemRows, orderId: order.id }).catch(() => {});
+  }
+
+  if (integration) {
+    const { pushOrderToPos } = require('../utils/posDispatcher');
+    pushOrderToPos(integration.provider, integration.config, order, orderItemRows)
+      .then(async (result) => {
+        await supabaseAdmin
+          .from('orders')
+          .update({
+            pos_sync_status: result.success ? 'synced' : 'failed',
+            pos_external_id: result.externalOrderId || '',
+            pos_sync_error: result.error || '',
+          })
+          .eq('id', order.id);
+      })
+      .catch(() => {});
+  }
+}
+
+// @route POST /api/public/drive-through/orders/confirm-payment
+// Body: { paymentId }
+// Polled by the drive-through page after a redirect-based payment
+// returns - same "poll after redirect" pattern the order/bill/booking
+// payment flows all already use. Confirming here (not just checking)
+// so a single page load after redirect is enough to finish the flow.
+const confirmDriveThroughPayment = asyncHandler(async (req, res) => {
+  const { paymentId } = req.body;
+  if (!paymentId) return res.status(400).json({ message: 'paymentId is required' });
+
+  const { data: payment } = await supabaseAdmin.from('payments').select('*').eq('id', paymentId).maybeSingle();
+  if (!payment) return res.status(404).json({ message: 'Payment not found' });
+
+  const { data: items } = await supabaseAdmin
+    .from('order_items').select('*, orders!inner(*)').in('id', payment.order_item_ids || []);
+  const order = items?.[0]?.orders;
+  if (!order) return res.status(404).json({ message: 'Order not found' });
+
+  if (payment.status === 'completed') return res.json({ status: 'completed', order });
+  if (payment.status === 'failed') {
+    return res.status(402).json({ message: payment.failure_reason || 'Payment failed - no order was sent to the kitchen', status: 'failed' });
+  }
+
+  const { data: business } = await supabaseAdmin.from('businesses').select('id, name, features').eq('id', payment.business_id).single();
+  const { data: paymentIntegration } = await supabaseAdmin
+    .from('pos_integrations')
+    .select('*').eq('business_id', business.id).eq('purpose', 'payment').eq('enabled', true).maybeSingle();
+  if (!paymentIntegration) return res.status(404).json({ message: 'Payment is not available for this business' });
+  const config = decryptConfig(paymentIntegration.config);
+
+  const adapter = payment.provider === 'telr'
+    ? require('../utils/telrAdapter')
+    : payment.provider === 'ngenius'
+    ? require('../utils/ngeniusAdapter')
+    : require('../utils/ziinaBillAdapter');
+
+  const { cancelAwaitingOrder, printPaidBillReceipt } = require('./publicController');
+
+  const check = await adapter.checkPaymentStatus(config, payment.provider_ref);
+  if (!check.success) return res.status(502).json({ message: check.error || 'Could not verify the payment yet', status: 'pending' });
+
+  if (!check.paid) {
+    await supabaseAdmin.from('payments').update({ status: 'failed', failure_reason: check.statusText || 'Not authorised' }).eq('id', payment.id);
+    await cancelAwaitingOrder(order.id);
+    return res.status(402).json({ message: 'Payment was not completed - no order was sent to the kitchen', status: 'failed' });
+  }
+
+  await supabaseAdmin.from('payments').update({ status: 'completed' }).eq('id', payment.id);
+
+  let integration = null;
+  if (business.features?.ordering?.posIntegration) {
+    const { data } = await supabaseAdmin
+      .from('pos_integrations').select('*').eq('business_id', business.id).eq('purpose', 'ordering').eq('enabled', true).maybeSingle();
+    integration = data ? { ...data, config: decryptConfig(data.config) } : data;
+  }
+
+  const orderItemRows = items.map(({ orders: _orders, ...item }) => item);
+  await finalizeDriveThroughOrder({ order, orderItemRows, integration, business, amountPaid: Number(payment.amount) });
+
+  // Real, explicit request: a receipt "everywhere" in this flow - same
+  // itemized shape bill payments already use, printed through the same
+  // printer integration, for whatever amount was actually charged here
+  // (the full total, or just the deposit if this was a partial one -
+  // the remainder's own receipt comes from Record Payment separately,
+  // see the matching addition there).
+  const { subtotalExVat, vatAmount, vatRate } = calculateVatInclusive(Number(payment.amount));
+  const receipt = {
+    items: orderItemRows.map((i) => ({
+      name: i.item_name,
+      quantity: i.quantity,
+      unitPrice: i.unit_price,
+      addons: i.addons || [],
+      lineTotal: Math.round((i.unit_price + Number(i.addon_total || 0)) * i.quantity * 100) / 100,
+    })),
+    subtotalExVat,
+    vatAmount,
+    vatRate,
+    discountAmount: 0,
+    rewardDescription: '',
+    tip: 0,
+    total: Number(payment.amount),
+    paidAt: new Date().toISOString(),
+    paymentId: payment.id,
+  };
+  await printPaidBillReceipt(business, payment, receipt);
+
+  res.json({ status: 'completed', order, receipt });
+});
+
 // @route GET /api/public/business/:slug/my-bookings?phone=
 // The "manage an existing booking" entry point - same OTP trust model
 // as everything else here (see requireVerifiedPhone), just reading
@@ -672,4 +1031,5 @@ module.exports = {
   getBookingPaymentStatus, getBookingArrival, confirmArrivalByCustomer,
   cancelPublicBooking, cancelPublicBookingService, listMyBookings, reschedulePublicBooking,
   reconcilePendingBookingPayments,
+  createDriveThroughOrder, confirmDriveThroughPayment,
 };

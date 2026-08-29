@@ -2488,4 +2488,12 @@ module.exports = {
   cancelBillPaySession,
   reconcilePendingBillPayments,
   reconcilePendingOrderPayments,
+  // Exported for reuse by bookingPublicController.js's drive-through
+  // order flow, which needs the exact same "payment confirmed -> order
+  // becomes real and visible to Kitchen/Orders/POS" logic as this
+  // file's own pay-before-order NFC flow - not a second implementation
+  // of the same thing.
+  finalizeOrderPayment,
+  cancelAwaitingOrder,
+  printPaidBillReceipt,
 };

@@ -746,7 +746,7 @@ const recordManualPayment = asyncHandler(async (req, res) => {
   // a different business could never settle someone else's order.
   const { data: order, error: orderError } = await req.supabase
     .from('orders')
-    .select('id, status, card_id, order_items(*)')
+    .select('id, status, card_id, order_type, order_items(*)')
     .eq('id', req.params.orderId)
     .eq('business_id', req.params.businessId)
     .single();
@@ -872,6 +872,53 @@ const recordManualPayment = asyncHandler(async (req, res) => {
     targetId: order.id,
     details: { tenders, amount: amountOwed, itemCount: settledIds.length },
   });
+
+  // Real, explicit request: a receipt printed "everywhere" money is
+  // actually collected, not just the customer-initiated bill-pay flow -
+  // same itemized/VAT-breakdown shape, same printer integration,
+  // printed for exactly the items just settled here (never the whole
+  // order - a partial/split settlement only ever receipts what was
+  // actually paid in this specific transaction). A print failure is
+  // never allowed to affect the payment that already succeeded, same
+  // reasoning printPaidBillReceipt itself already follows.
+  try {
+    const { data: printerIntegration } = await supabaseAdmin
+      .from('pos_integrations')
+      .select('config')
+      .eq('business_id', req.params.businessId)
+      .eq('purpose', 'printing')
+      .eq('enabled', true)
+      .maybeSingle();
+    if (printerIntegration) {
+      const { data: biz } = await supabaseAdmin.from('businesses').select('name').eq('id', req.params.businessId).single();
+      let tableLabel = order.order_type === 'drive_through' ? 'Drive Through' : '';
+      if (!tableLabel && order.card_id) {
+        const { data: card } = await supabaseAdmin.from('cards').select('label').eq('id', order.card_id).maybeSingle();
+        tableLabel = card?.label || '';
+      }
+      const { subtotalExVat, vatAmount, vatRate } = calculateVatInclusive(amountOwed);
+      const lines = [];
+      lines.push((biz?.name || 'Tavzio').toUpperCase());
+      if (tableLabel) lines.push(`Table: ${tableLabel}`);
+      lines.push(new Date().toLocaleString('en-GB'));
+      lines.push('--------------------------------');
+      for (const item of selectedItems) {
+        const lineTotal = Math.round((item.unit_price + Number(item.addon_total || 0)) * item.quantity * 100) / 100;
+        lines.push(`${item.quantity}x ${item.item_name}`.padEnd(24) + lineTotal.toFixed(2).padStart(8));
+      }
+      lines.push('--------------------------------');
+      lines.push('Subtotal'.padEnd(24) + subtotalExVat.toFixed(2).padStart(8));
+      lines.push(`VAT (${(vatRate * 100).toFixed(0)}%)`.padEnd(24) + vatAmount.toFixed(2).padStart(8));
+      lines.push('--------------------------------');
+      lines.push('TOTAL PAID'.padEnd(24) + amountOwed.toFixed(2).padStart(8));
+      lines.push('--------------------------------');
+      lines.push('PAID - thank you!');
+      const { sendPrintJob } = require('../utils/printNodeAdapter');
+      await sendPrintJob(decryptConfig(printerIntegration.config), lines.join('\n'));
+    }
+  } catch (err) {
+    console.error(`Manual-payment receipt print failed for business ${req.params.businessId}, order ${order.id}:`, err.message);
+  }
 
   res.status(201).json({ amount: amountOwed, itemCount: settledIds.length, tenders });
 });

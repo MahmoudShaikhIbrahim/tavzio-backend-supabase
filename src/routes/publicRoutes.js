@@ -10,6 +10,7 @@ const {
   getBookingConfig, requestBookingOtp, verifyBookingOtp, createPublicBooking,
   getBookingPaymentStatus, getBookingArrival, confirmArrivalByCustomer,
   cancelPublicBooking, cancelPublicBookingService, listMyBookings, reschedulePublicBooking,
+  createDriveThroughOrder, confirmDriveThroughPayment,
 } = require('../controllers/bookingPublicController');
 const {
   resolveCardTap,
@@ -109,6 +110,8 @@ router.get('/business/:slug/booking-config', getBookingConfig);
 router.post('/business/:slug/booking-otp/request', bookingOtpLimiter, requestBookingOtp);
 router.post('/business/:slug/booking-otp/verify', verifyBookingOtp);
 router.post('/business/:slug/bookings', createPublicBooking);
+router.post('/business/:slug/drive-through/orders', createDriveThroughOrder);
+router.post('/drive-through/orders/confirm-payment', confirmDriveThroughPayment);
 router.get('/bookings/:bookingId/status', getBookingPaymentStatus);
 router.get('/bookings/:bookingId/arrival', getBookingArrival);
 router.post('/bookings/:bookingId/confirm-arrival', confirmArrivalByCustomer);

@@ -2,6 +2,7 @@ const express = require('express');
 const {
   listTables, createTable, updateTable, deleteTable, connectCard, disconnectCard, mergeTables, unmergeTable,
   listWaitlist, addToWaitlist, seatWaitlistEntry, cancelWaitlistEntry,
+  listFloorPlanCells, setFloorPlanCells,
 } = require('../controllers/tableManagementController');
 const { protect, enforceTenant } = require('../middleware/auth');
 
@@ -17,5 +18,8 @@ router.post('/:tableId/connect-card', connectCard);
 router.post('/:tableId/disconnect-card', disconnectCard);
 router.post('/:tableId/merge', mergeTables);
 router.post('/:tableId/unmerge', unmergeTable);
+
+router.get('/cells', listFloorPlanCells);
+router.put('/cells', setFloorPlanCells);
 
 module.exports = router;
