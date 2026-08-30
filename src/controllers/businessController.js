@@ -1,6 +1,7 @@
 const asyncHandler = require('../utils/asyncHandler');
 const { supabaseAdmin } = require('../config/supabaseClient');
 const { translateToAllLanguages } = require('../utils/translate');
+const { uniqueSlug } = require('../utils/slugify');
 
 // @route GET /api/businesses/:businessId
 const getBusiness = asyncHandler(async (req, res) => {
@@ -33,13 +34,27 @@ const updateBusiness = asyncHandler(async (req, res) => {
 
   const { data: existing, error: fetchError } = await req.supabase
     .from('businesses')
-    .select('links, theme, notification_settings')
+    .select('links, theme, notification_settings, name, slug')
     .eq('id', req.params.businessId)
     .single();
   if (fetchError || !existing) return res.status(404).json({ message: 'Business not found' });
 
   const update = {};
   if (name !== undefined) update.name = name;
+  // Real, explicit request: the booking link's slug now follows the
+  // business's own name automatically, the same way it already would
+  // if set fresh today (see contractController.js's own slug
+  // generation) - only actually recomputed when the name is genuinely
+  // changing to something that slugifies differently, so a same-name
+  // save, a pure capitalization tweak, or any other update that
+  // doesn't touch name never touches the existing slug or its printed
+  // QR codes and shared links. excludeId is what keeps this business's
+  // own current row from being mistaken for a collision against
+  // itself on an unrelated field's save.
+  if (name !== undefined && name !== existing.name) {
+    const newSlug = await uniqueSlug(supabaseAdmin, 'businesses', name, { excludeId: req.params.businessId });
+    if (newSlug !== existing.slug) update.slug = newSlug;
+  }
   if (logoUrl !== undefined) update.logo_url = logoUrl;
   if (coverImageUrl !== undefined) update.cover_image_url = coverImageUrl;
   if (trn !== undefined) update.trn = trn;
