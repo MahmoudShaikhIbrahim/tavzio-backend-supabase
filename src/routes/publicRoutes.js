@@ -105,7 +105,26 @@ router.patch('/demo/requests/:requestId/acknowledge', acknowledgeDemoRequest);
 // sends a real SMS that costs real money, and is a classic abuse
 // target (SMS-bombing a stranger's number) if left at the general
 // limit.
-const bookingOtpLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5 });
+//
+// Real, explicit recalibration (confirmed by direct report: 5 per 15
+// minutes was "too tight" for real use) - now scoped per business
+// (keyGenerator reads the :slug this route is already matched on,
+// instead of the library's own default of per-IP) rather than one
+// shared bucket across every business on the platform. A busy
+// restaurant's own volume no longer competes with, or gets throttled
+// by, every other business's OTP traffic - each gets its own real
+// 20-per-10-minutes allowance. That number is still meaningfully
+// tighter than "unlimited": once verified, a device is remembered and
+// never asks again (see loyaltyStorage's own device-memory pattern,
+// applied the same way here), so legitimate repeat volume from
+// returning customers never touches this limiter at all - 20 is sized
+// for genuinely new customers in a 10-minute window, not for anyone
+// legitimately needing more than one OTP themselves.
+const bookingOtpLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 20,
+  keyGenerator: (req) => req.params.slug || req.ip,
+});
 router.get('/business/:slug/booking-config', getBookingConfig);
 // The chooser page's own lightweight lookup - see its own comment on
 // getBookingChooserConfig for why this exists as a separate route

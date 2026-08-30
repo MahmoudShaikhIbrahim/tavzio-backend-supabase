@@ -4,6 +4,7 @@ const { logAction } = require('../utils/auditLog');
 const { sendOtp, validateOtp } = require('../utils/smsAdapter');
 const { decryptConfig } = require('../utils/credentialEncryption');
 const { calculateVatInclusive } = require('../utils/vat');
+const { isPhoneVerified } = require('../utils/phoneVerification');
 const { primaryClientUrl } = require('../utils/clientUrl');
 
 const OTP_EXPIRY_MINUTES = 10;
@@ -557,20 +558,12 @@ async function reconcilePendingBookingPayments() {
 // Shared by createPublicBooking, listMyBookings, and
 // reschedulePublicBooking - all three need the exact same proof: a
 // phone verified at this business within the last
-// VERIFIED_WINDOW_MINUTES. Centralized here after this became the
-// third copy of the same five-line check.
+// VERIFIED_WINDOW_MINUTES. Delegates to the real, shared
+// isPhoneVerified (utils/phoneVerification.js) - also used by
+// loyaltyCheckin's own verification, with a different window for its
+// genuinely different "verified once, ever" requirement.
 async function requireVerifiedPhone(businessId, phone) {
-  const { data: verified } = await supabaseAdmin
-    .from('booking_otp_codes')
-    .select('id')
-    .eq('business_id', businessId)
-    .eq('phone', phone)
-    .not('verified_at', 'is', null)
-    .gte('verified_at', new Date(Date.now() - VERIFIED_WINDOW_MINUTES * 60000).toISOString())
-    .order('verified_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  return !!verified;
+  return isPhoneVerified(businessId, phone, VERIFIED_WINDOW_MINUTES);
 }
 
 const MIN_ARRIVAL_MINUTES = 5;

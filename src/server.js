@@ -67,7 +67,37 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 // this is a real recalibration to match it, not an arbitrary bump.
 const authApiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 900 });
 const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 4000 });
-const publicLimiter = rateLimit({ windowMs: 60 * 1000, max: 60 });
+// Real, explicit recalibration (confirmed by direct report: 60/min
+// shared globally across every business on the platform is far too
+// tight - a busy restaurant's own real customer traffic competes for
+// the same shared bucket as everyone else's). Scoped per business now,
+// the same real fix already applied to the OTP limiter above: each
+// business's own booking page, menu, and orders get their own genuine
+// 120-per-minute allowance, completely independent of how much
+// traffic any other business is generating at the same moment.
+//
+// This one can't just read req.params.slug the way the OTP limiter
+// does - it runs before Express has matched a specific route (it's
+// mounted once, ahead of every route in this whole router, not
+// attached to one route the way bookingOtpLimiter is), so req.params
+// is genuinely empty here. Parses the slug straight out of the URL
+// path instead, matching the /business/:slug/... and /hotel/:slug/...
+// shape essentially every real, high-traffic route in this file
+// actually has. The handful that don't carry a slug at all (a card's
+// very first tap before any business context exists yet, lead
+// capture, a route keyed by booking id instead) fall back to the
+// library's own per-IP default - a real business identifier isn't
+// available yet at this point for those, and adding a database lookup
+// here just to rate-limit would cost every single request real
+// latency for no benefit.
+const publicLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  keyGenerator: (req) => {
+    const match = req.path.match(/^\/(?:business|hotel)\/([^/]+)/);
+    return match ? match[1] : req.ip;
+  },
+});
 
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
 

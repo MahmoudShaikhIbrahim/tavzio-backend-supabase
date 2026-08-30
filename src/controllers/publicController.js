@@ -5,6 +5,7 @@ const { resolveText } = require('../utils/translate');
 const { maybeAutoCloseTable } = require('../utils/tableAutoClose');
 const { sendPrintJob } = require('../utils/printNodeAdapter');
 const { primaryClientUrl } = require('../utils/clientUrl');
+const { isPhoneVerified } = require('../utils/phoneVerification');
 
 function detectDevice(userAgent = '') {
   const ua = userAgent.toLowerCase();
@@ -368,6 +369,20 @@ const loyaltyCheckin = asyncHandler(async (req, res) => {
     .eq('enabled', true)
     .maybeSingle();
   if (!program) return res.status(404).json({ message: 'Loyalty program not enabled' });
+
+  // Real, explicit fix (confirmed by direct report: there was no OTP
+  // for loyalty at all - any phone number could be typed with nothing
+  // to prove it was actually the customer's own). Requires proof this
+  // exact phone was verified via OTP at this business at some point -
+  // no time window, deliberately unlike booking's own check just below
+  // in this file's sibling controller: the whole point of "verify once
+  // and the device remembers you" is that a silent, no-form-shown
+  // auto-checkin (see LoyaltyWidget.tsx) can keep working indefinitely
+  // without ever re-prompting, which a time-limited window would
+  // quietly break the moment it expired.
+  if (!(await isPhoneVerified(business.id, phone))) {
+    return res.status(400).json({ message: 'Verify your phone number first' });
+  }
 
   // Verify the tap token: must be a real, recent nfc_tap event for this business.
   const cutoff = new Date(Date.now() - TAP_TOKEN_VALID_MINUTES * 60 * 1000).toISOString();
