@@ -1,4 +1,5 @@
 const asyncHandler = require('../utils/asyncHandler');
+const { naturalCompare } = require('../utils/naturalCompare');
 
 // @route GET /api/businesses/:businessId/tables
 // The real floor plan view - every table, whether or not it currently
@@ -8,9 +9,9 @@ const listTables = asyncHandler(async (req, res) => {
   const { data: tables, error } = await req.supabase
     .from('tables')
     .select('*, cards(id, uid, label, status)')
-    .eq('business_id', req.params.businessId)
-    .order('label');
+    .eq('business_id', req.params.businessId);
   if (error) return res.status(400).json({ message: error.message });
+  tables.sort((a, b) => naturalCompare(a.label, b.label));
 
   const connectedCardIds = tables.map((t) => t.cards?.[0]?.id).filter(Boolean);
   const { data: orders } = connectedCardIds.length > 0 ? await req.supabase

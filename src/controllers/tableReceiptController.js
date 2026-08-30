@@ -4,6 +4,7 @@ const { logAction } = require('../utils/auditLog');
 const { sendPrintJob } = require('../utils/printNodeAdapter');
 const { UAE_VAT_RATE, calculateVatInclusive } = require('../utils/vat');
 const { decryptConfig } = require('../utils/credentialEncryption');
+const { naturalCompare } = require('../utils/naturalCompare');
 
 function vatBreakdown(grossAmount) {
   const { subtotalExVat, vatAmount } = calculateVatInclusive(grossAmount);
@@ -38,7 +39,13 @@ const listTablesWithUnpaid = asyncHandler(async (req, res) => {
     byCard.set(order.card_id, existing);
   }
 
-  res.json(Array.from(byCard.values()).sort((a, b) => a.tableLabel.localeCompare(b.tableLabel)));
+  // Real, confirmed bug fix (a full audit found this specific sort had
+  // never actually been fixed, even after the same bug was already
+  // fixed elsewhere): plain .localeCompare with no numeric option sorts
+  // "Table 10" right after "Table 1", not after "Table 9" where it
+  // numerically belongs - see naturalCompare's own comment for the full
+  // explanation, now shared so this can't happen again in a third place.
+  res.json(Array.from(byCard.values()).sort((a, b) => naturalCompare(a.tableLabel, b.tableLabel)));
 });
 
 // @route GET /api/businesses/:businessId/tables/:cardId/receipt
