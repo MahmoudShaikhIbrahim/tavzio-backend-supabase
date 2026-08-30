@@ -146,6 +146,46 @@ const getBookingConfig = asyncHandler(async (req, res) => {
   });
 });
 
+// @route GET /api/public/business/:slug/booking-chooser
+// Real, explicit performance fix (confirmed by direct report - "why
+// not make it render faster" rather than just hide the wait): this
+// page is a genuinely tiny screen (a logo, a name, and which of Book
+// a Table / Drive Through / Location to show), but it was calling
+// getBookingConfig above - the SAME endpoint the actual booking form
+// and drive-through ordering page use, both of which genuinely need
+// the full menu and every service's options for pre-order/service
+// selection. The chooser never reads either field, but was still
+// paying for both of those extra queries on every single load. This
+// is the identical business lookup with the menu_items and services
+// queries removed entirely, since this page has no use for them - a
+// real reduction in round trips for the one caller that never needed
+// them, not a second copy of the same fetch. BookingPage.tsx and
+// DriveThroughPage.tsx keep calling getBookingConfig above, completely
+// unchanged - they still need what only that endpoint provides.
+const getBookingChooserConfig = asyncHandler(async (req, res) => {
+  const { data: business, error } = await supabaseAdmin
+    .from('businesses')
+    .select('name, logo_url, features')
+    .eq('slug', req.params.slug)
+    .eq('status', 'active')
+    .maybeSingle();
+  if (error || !business) return res.status(404).json({ message: 'Business not found' });
+
+  const booking = business.features?.onlineBooking || {};
+  const driveThrough = business.features?.driveThrough || {};
+  if (!booking.enabled && !driveThrough.enabled) {
+    return res.status(404).json({ message: 'Online booking is not available for this business' });
+  }
+
+  res.json({
+    businessName: business.name,
+    bookingEnabled: !!booking.enabled,
+    driveThrough: { enabled: !!driveThrough.enabled },
+    locationUrl: booking.locationUrl || '',
+    logoUrl: business.logo_url || '',
+  });
+});
+
 // @route POST /api/public/business/:slug/booking-otp/request
 // Body: { phone }
 // Verify Now generates and holds the actual OTP on their side - we just
@@ -401,7 +441,14 @@ const getBookingPaymentStatus = asyncHandler(async (req, res) => {
 const getBookingArrival = asyncHandler(async (req, res) => {
   const { data: booking } = await supabaseAdmin
     .from('bookings')
-    .select('id, guest_name, party_size, requested_at, status, arrival_status, customer_phone_verified')
+    // Real bug fix (confirmed by direct report: "Continue to al-baik" -
+    // the URL slug shown as if it were the business's own name). This
+    // page never had the business's real name at all before, only the
+    // guest's own booking details - businesses(name) is a free addition
+    // to the same query already running here (a joined column, not a
+    // second round trip), so the frontend has an actual name to show
+    // instead of falling back to the slug.
+    .select('id, guest_name, party_size, requested_at, status, arrival_status, customer_phone_verified, businesses(name)')
     .eq('id', req.params.bookingId)
     .maybeSingle();
   // Same real gate as resolveCardTap in publicController.js, enforced
@@ -412,7 +459,8 @@ const getBookingArrival = asyncHandler(async (req, res) => {
   if (!booking || booking.status !== 'confirmed' || booking.arrival_status !== 'not_arrived' || !booking.customer_phone_verified) {
     return res.status(404).json({ message: 'No pending arrival for this booking' });
   }
-  res.json(booking);
+  const { businesses, ...bookingFields } = booking;
+  res.json({ ...bookingFields, businessName: businesses?.name || null });
 });
 
 // @route POST /api/public/bookings/:bookingId/confirm-arrival
@@ -1027,7 +1075,7 @@ const cancelPublicBookingService = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  getBookingConfig, requestBookingOtp, verifyBookingOtp, createPublicBooking,
+  getBookingConfig, getBookingChooserConfig, requestBookingOtp, verifyBookingOtp, createPublicBooking,
   getBookingPaymentStatus, getBookingArrival, confirmArrivalByCustomer,
   cancelPublicBooking, cancelPublicBookingService, listMyBookings, reschedulePublicBooking,
   reconcilePendingBookingPayments,

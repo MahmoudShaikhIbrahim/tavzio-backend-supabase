@@ -7,7 +7,7 @@ const { listPublicOutlets } = require('../controllers/hotelOutletsController');
 const { submitCustomButtonRequest } = require('../controllers/customButtonController');
 const { createFolioPaymentSession, confirmFolioPayment } = require('../controllers/hotelPaymentController');
 const {
-  getBookingConfig, requestBookingOtp, verifyBookingOtp, createPublicBooking,
+  getBookingConfig, getBookingChooserConfig, requestBookingOtp, verifyBookingOtp, createPublicBooking,
   getBookingPaymentStatus, getBookingArrival, confirmArrivalByCustomer,
   cancelPublicBooking, cancelPublicBookingService, listMyBookings, reschedulePublicBooking,
   createDriveThroughOrder, confirmDriveThroughPayment,
@@ -107,6 +107,10 @@ router.patch('/demo/requests/:requestId/acknowledge', acknowledgeDemoRequest);
 // limit.
 const bookingOtpLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5 });
 router.get('/business/:slug/booking-config', getBookingConfig);
+// The chooser page's own lightweight lookup - see its own comment on
+// getBookingChooserConfig for why this exists as a separate route
+// rather than reusing booking-config above.
+router.get('/business/:slug/booking-chooser', getBookingChooserConfig);
 router.post('/business/:slug/booking-otp/request', bookingOtpLimiter, requestBookingOtp);
 router.post('/business/:slug/booking-otp/verify', verifyBookingOtp);
 router.post('/business/:slug/bookings', createPublicBooking);
