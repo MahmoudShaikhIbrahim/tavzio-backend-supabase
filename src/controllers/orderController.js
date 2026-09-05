@@ -229,12 +229,21 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   const { data, error } = await query.select().single();
 
   if (error || !data) {
-    // The .is('prep_started_at', null) guard above means "no row updated"
-    // can also just mean this ticket already started - not a real error,
-    // so fetch and return it as-is rather than reporting a false failure.
+    // The .is('prep_started_at', null) guard above means "no row
+    // updated" can also just mean this ticket already started - not a
+    // real error. But it can ALSO mean the update itself genuinely
+    // failed (a constraint violation, a permission problem) - and those
+    // two cases were being treated identically before, which is exactly
+    // how a real bug (the orders_status_check constraint silently
+    // missing 'preparing' as an allowed value, fixed in migration 0127)
+    // stayed hidden: this always returned the stale row as if the
+    // update had succeeded. Only the genuinely-already-started case
+    // (the order is already at or past 'preparing') gets treated as a
+    // non-error now; anything else surfaces as a real failure.
     if (status === 'preparing') {
       const { data: existing } = await req.supabase.from('orders').select('*').eq('id', req.params.orderId).eq('business_id', req.params.businessId).single();
-      if (existing) return res.json(existing);
+      if (existing && existing.status !== 'pending') return res.json(existing);
+      if (existing) return res.status(400).json({ message: error?.message || 'Could not start this order' });
     }
     return res.status(404).json({ message: 'Order not found' });
   }

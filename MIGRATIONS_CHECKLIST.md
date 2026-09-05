@@ -144,6 +144,7 @@ table, added in the same commit/PR that adds the migration file itself.
 | 0124 | `0124_index_audit_room_and_otp_verification.sql` | [ ] | [ ] |
 | 0125 | `0125_staff_avatar.sql` | [ ] | [ ] |
 | 0126 | `0126_staff_phone.sql` | [ ] | [ ] |
+| 0127 | `0127_fix_orders_status_check.sql` | [ ] | [ ] |
 
 ## How to apply a migration
 
