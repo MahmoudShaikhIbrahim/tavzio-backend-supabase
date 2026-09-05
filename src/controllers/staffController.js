@@ -83,12 +83,21 @@ const inviteStaff = asyncHandler(async (req, res) => {
 const listStaff = asyncHandler(async (req, res) => {
   const { data, error } = await req.supabase
     .from('profiles')
-    .select('id, name, role, job_role, is_active, last_login_at, created_at, assigned_sections, assigned_outlet_ids, full_access, nav_layout, organization_id, avatar_url')
+    .select('id, name, role, job_role, is_active, last_login_at, created_at, assigned_sections, assigned_outlet_ids, full_access, nav_layout, organization_id, avatar_url, phone')
     .eq('business_id', req.params.businessId)
     .in('role', ['staff', 'business_owner', 'org_owner']);
 
   if (error) return res.status(400).json({ message: error.message });
-  res.json(data);
+
+  // Email lives on auth.users, not profiles - merged in per-account via
+  // the admin API rather than joined through RLS (which can't reach
+  // auth.users at all). A business's own roster is small enough that
+  // this stays fast done in parallel.
+  const withEmail = await Promise.all(data.map(async (s) => {
+    const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(s.id);
+    return { ...s, email: authUser?.user?.email || null };
+  }));
+  res.json(withEmail);
 });
 
 // @route PATCH /api/businesses/:businessId/staff/:userId/job-role
@@ -300,24 +309,40 @@ const setMyNavLayout = asyncHandler(async (req, res) => {
 
 // @route PATCH /api/businesses/:businessId/staff/:userId/avatar
 // Body: { avatarUrl: string | null }
-// Self-service, exactly like nav-layout above: an account sets its own
-// picture only (never someone else's, even an owner setting a staff
-// member's photo for them) - :userId always has to be the caller's own
-// id. The actual file already lives in Supabase Storage by the time this
-// runs (uploaded client-side the same way menu photos are); this just
-// records the resulting URL against the profile.
-const setMyAvatar = asyncHandler(async (req, res) => {
-  if (req.params.userId !== req.user.id) {
-    return res.status(403).json({ message: 'You can only change your own picture' });
-  }
+// Deliberately NOT self-service, unlike nav-layout above: an owner (or
+// full-access manager, via authorize() below) sets a team member's
+// picture for them - the actual, explicit request was that staff never
+// upload their own. Enforced by the route's authorize() middleware, not
+// a userId match here. The file itself already lives in Supabase
+// Storage by the time this runs; this just records the resulting URL.
+const setStaffAvatar = asyncHandler(async (req, res) => {
   const { avatarUrl } = req.body;
   const { data, error } = await req.supabase
     .from('profiles')
     .update({ avatar_url: avatarUrl || null })
-    .eq('id', req.user.id)
+    .eq('id', req.params.userId)
+    .eq('business_id', req.params.businessId)
     .select('id, avatar_url')
     .single();
   if (error || !data) return res.status(400).json({ message: error?.message || 'Could not save picture' });
+  res.json(data);
+});
+
+// @route PATCH /api/businesses/:businessId/staff/:userId/phone
+// Body: { phone: string | null }
+// Same "owner/manager sets it" pattern as the avatar above - contact
+// info an owner records about their team, not a personal preference the
+// account manages for itself.
+const setStaffPhone = asyncHandler(async (req, res) => {
+  const { phone } = req.body;
+  const { data, error } = await req.supabase
+    .from('profiles')
+    .update({ phone: phone || null })
+    .eq('id', req.params.userId)
+    .eq('business_id', req.params.businessId)
+    .select('id, phone')
+    .single();
+  if (error || !data) return res.status(400).json({ message: error?.message || 'Could not save phone number' });
   res.json(data);
 });
 
@@ -398,4 +423,4 @@ const resendStaffInvite = asyncHandler(async (req, res) => {
   res.json({ message: 'Invite resent' });
 });
 
-module.exports = { inviteStaff, resendStaffInvite, listStaff, setStaffActive, deleteStaff, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, setMyAvatar, listRolePermissions, resetPassword };
+module.exports = { inviteStaff, resendStaffInvite, listStaff, setStaffActive, deleteStaff, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, setStaffAvatar, setStaffPhone, listRolePermissions, resetPassword };

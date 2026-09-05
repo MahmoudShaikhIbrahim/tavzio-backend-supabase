@@ -1,5 +1,5 @@
 const express = require('express');
-const { inviteStaff, resendStaffInvite, listStaff, setStaffActive, deleteStaff, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, setMyAvatar, listRolePermissions, resetPassword } = require('../controllers/staffController');
+const { inviteStaff, resendStaffInvite, listStaff, setStaffActive, deleteStaff, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, setStaffAvatar, setStaffPhone, listRolePermissions, resetPassword } = require('../controllers/staffController');
 const { clearStaffPin } = require('../controllers/pinController');
 const { issueAdminCard } = require('../controllers/cardController');
 const { protect, authorize, enforceTenant } = require('../middleware/auth');
@@ -35,9 +35,10 @@ router.patch('/:userId/full-access', authorize('business_owner', 'super_admin'),
 // deliberately self-service - setMyNavLayout itself enforces that
 // :userId can only ever be the caller's own id, not gated by role here.
 router.patch('/:userId/nav-layout', setMyNavLayout);
-// Same self-service pattern: a person's own profile picture, never
-// settable for someone else, not even by an owner.
-router.patch('/:userId/avatar', setMyAvatar);
+// Explicit request: an owner/manager sets a team member's photo and
+// phone for them - never self-service, unlike nav-layout above.
+router.patch('/:userId/avatar', authorize('business_owner', 'super_admin'), setStaffAvatar);
+router.patch('/:userId/phone', authorize('business_owner', 'super_admin'), setStaffPhone);
 // The actual fix for "an onboarded account is locked out and nobody can
 // get back in" - generates a real temporary password directly via the
 // Supabase Admin API, forces a fresh one on next login. Owner or

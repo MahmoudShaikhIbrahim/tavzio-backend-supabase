@@ -143,6 +143,7 @@ table, added in the same commit/PR that adds the migration file itself.
 | 0123 | `0123_floor_plan_cell_orientation.sql` | [ ] | [ ] |
 | 0124 | `0124_index_audit_room_and_otp_verification.sql` | [ ] | [ ] |
 | 0125 | `0125_staff_avatar.sql` | [ ] | [ ] |
+| 0126 | `0126_staff_phone.sql` | [ ] | [ ] |
 
 ## How to apply a migration
 
