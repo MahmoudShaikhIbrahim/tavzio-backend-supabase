@@ -83,7 +83,7 @@ const inviteStaff = asyncHandler(async (req, res) => {
 const listStaff = asyncHandler(async (req, res) => {
   const { data, error } = await req.supabase
     .from('profiles')
-    .select('id, name, role, job_role, is_active, last_login_at, created_at, assigned_sections, assigned_outlet_ids, full_access, nav_layout, organization_id')
+    .select('id, name, role, job_role, is_active, last_login_at, created_at, assigned_sections, assigned_outlet_ids, full_access, nav_layout, organization_id, avatar_url')
     .eq('business_id', req.params.businessId)
     .in('role', ['staff', 'business_owner', 'org_owner']);
 
@@ -269,8 +269,10 @@ const setStaffFullAccess = asyncHandler(async (req, res) => {
 });
 
 // @route PATCH /api/businesses/:businessId/staff/:userId/nav-layout
-// Body: { hidden: string[], order: string[] } | null
-// Per-person dashboard tab customization - hide/reorder. Deliberately
+// Body: { hidden: string[], order: string[], pinned?: string[] } | null
+// Per-person dashboard tab customization - hide/reorder, plus which
+// Settings pages (if any) are pinned onto the main dashboard tab row
+// instead of living only inside the Settings list. Deliberately
 // self-service: unlike sections/outlets/full-access (which only an
 // owner can set on someone else), a person sets this on THEIR OWN
 // account only (enforced by matching :userId against req.user.id, not
@@ -280,10 +282,11 @@ const setMyNavLayout = asyncHandler(async (req, res) => {
   if (req.params.userId !== req.user.id) {
     return res.status(403).json({ message: 'You can only change your own nav layout' });
   }
-  const { hidden, order } = req.body;
+  const { hidden, order, pinned } = req.body;
   const layout = (hidden === null && order === null) ? null : {
     hidden: Array.isArray(hidden) ? hidden : [],
     order: Array.isArray(order) ? order : [],
+    pinned: Array.isArray(pinned) ? pinned : [],
   };
   const { data, error } = await req.supabase
     .from('profiles')
@@ -292,6 +295,29 @@ const setMyNavLayout = asyncHandler(async (req, res) => {
     .select('id, nav_layout')
     .single();
   if (error || !data) return res.status(400).json({ message: error?.message || 'Could not save layout' });
+  res.json(data);
+});
+
+// @route PATCH /api/businesses/:businessId/staff/:userId/avatar
+// Body: { avatarUrl: string | null }
+// Self-service, exactly like nav-layout above: an account sets its own
+// picture only (never someone else's, even an owner setting a staff
+// member's photo for them) - :userId always has to be the caller's own
+// id. The actual file already lives in Supabase Storage by the time this
+// runs (uploaded client-side the same way menu photos are); this just
+// records the resulting URL against the profile.
+const setMyAvatar = asyncHandler(async (req, res) => {
+  if (req.params.userId !== req.user.id) {
+    return res.status(403).json({ message: 'You can only change your own picture' });
+  }
+  const { avatarUrl } = req.body;
+  const { data, error } = await req.supabase
+    .from('profiles')
+    .update({ avatar_url: avatarUrl || null })
+    .eq('id', req.user.id)
+    .select('id, avatar_url')
+    .single();
+  if (error || !data) return res.status(400).json({ message: error?.message || 'Could not save picture' });
   res.json(data);
 });
 
@@ -372,4 +398,4 @@ const resendStaffInvite = asyncHandler(async (req, res) => {
   res.json({ message: 'Invite resent' });
 });
 
-module.exports = { inviteStaff, resendStaffInvite, listStaff, setStaffActive, deleteStaff, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, listRolePermissions, resetPassword };
+module.exports = { inviteStaff, resendStaffInvite, listStaff, setStaffActive, deleteStaff, setStaffJobRole, setStaffSections, setStaffOutlets, setStaffFullAccess, setMyNavLayout, setMyAvatar, listRolePermissions, resetPassword };
